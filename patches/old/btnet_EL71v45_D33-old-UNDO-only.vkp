@@ -1,0 +1,37 @@
+;EL71v45
+;Предыдущий единый btnet D33: LMAN + автономный режим WSP.
+;Только для отмены прежней версии при переходе на D36.
+;Не устанавливать вместо актуального btnet_EL71v45.vkp из папки выше.
+;
+;Подготовка соединения LMAN через эльф-мост
+00974F78: F0B5BF4EFFB0041C 004B184700FC5BA1 ; RequestLMANConnect: переход к обработчику запроса подключения
+015BFC00: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 7F402DE998009FE598C09FE53CFF2FE1 ; Сохранить регистры и найти сетевой процесс ENIP (40B4)
+015BFC10: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 000050E31A00000A3C4090E5030014E3 ; Если ENIP найден, получить адрес его текущего обработчика сообщений
+015BFC20: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 1700001A2A53A0E3050054E11400003A ; Перейти к обычному подключению, если обработчик не находится в памяти эльфов
+015BFC30: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 74509FE5050054E11100008A005094E5 ; Завершить проверку адреса и прочитать первую команду обработчика
+015BFC40: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 68609FE5060055E10D00001A045094E5 ; Убедиться, что это вход моста, и прочитать его идентификатор
+015BFC50: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 5C609FE5060055E10900001A0CC094E5 ; Распознать мост по метке BTN1 и получить адрес функции подготовки подключения
+015BFC60: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 0150CCE32A63A0E3060055E10400003A ; Учесть режим ARM/Thumb и проверить нижнюю границу адреса этой функции
+015BFC70: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 40609FE5060055E10100008A00009DE5 ; Проверить верхнюю границу адреса и передать исходный запрос LMAN
+015BFC80: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 3CFF2FE17F40BDE8F0402DE928609FE5 ; Вызвать мост, восстановить регистры и начать исходную функцию подключения
+015BFC90: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 006096E57FDF4DE20040A0E11C309FE5 ; Восстановить начало исходной функции: данные, место в стеке и аргумент запроса
+015BFCA0: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 13FF2FE1B4400000DD5F09A0F0FFFFAD ; Продолжить исходную функцию; далее константы: процесс ENIP, его поиск, граница памяти
+015BFCB0: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 00F09FE542544E31FCFFFFAD785297A0 ; Константы: команда входа моста, метка BTN1, граница памяти и адрес исходных данных
+015BFCC0: FFFFFFFF 814F97A0 ; Адрес продолжения RequestLMANConnect после перехваченного начала
+;Разрешение сети для WAP-браузера при готовом BT-мосте
+005FFCC8: BCB51820CCF0E6FF 004B184700FE5BA1 ; Проверка автономного режима WSP: переход к обработчику BT-моста
+015BFE00: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 7F402DE9B4009FE5B4C09FE53CFF2FE1 ; Сохранить регистры и найти сетевой процесс ENIP
+015BFE10: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 000050E32200000A3C4090E5030014E3 ; Получить обработчик ENIP, через который доступен эльф-мост
+015BFE20: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 1F00001A2A53A0E3050054E11C00003A ; Начать проверку, что обработчик находится в памяти эльфа
+015BFE30: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 90509FE5050054E11900008A005094E5 ; Завершить проверку адреса и прочитать первую команду обработчика
+015BFE40: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 84609FE5060055E11500001A045094E5 ; Распознать команду входа моста и прочитать его идентификатор
+015BFE50: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 78609FE5060055E11100001A145094E5 ; Проверить метку BTN1 и наличие расширения для управления WSP
+015BFE60: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 6C609FE5060055E10D00001A10C094E5 ; Проверить расширение BTN2 и получить функцию доступности BT-интернета
+015BFE70: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 0150CCE32A63A0E3060055E10800003A ; Проверить нижнюю границу адреса функции эльфа
+015BFE80: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 50609FE5060055E10500008A3CFF2FE1 ; Завершить проверку адреса и запросить готовность моста
+015BFE90: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 000050E30200000A7F40BDE80000A0E3 ; Если мост готов, ответить браузеру: автономный режим выключен
+015BFEA0: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 1EFF2FE17F40BDE8BC402DE91800A0E3 ; Иначе восстановить регистры и начать обычную проверку прошивки
+015BFEB0: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 24C09FE53CFF2FE120C09FE51CFF2FE1 ; Получить объект настроек WSP и продолжить исходную функцию
+015BFEC0: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF B4400000DD5F09A0E8FFFFAD00F09FE5 ; Адреса и границы памяти, используемые обработчиком
+015BFED0: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 42544E3142544E32FCFFFFAD9DCC6CA0 ; Команда входа моста и идентификаторы BTN1/BTN2
+015BFEE0: FFFFFFFF D1FC5FA0 ; Адреса штатного поиска настроек и продолжения проверки WSP

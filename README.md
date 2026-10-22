@@ -1,0 +1,66 @@
+# BT PAN для BenQ-Siemens EL71 sw45 и E71 sw45
+
+[English version](README.en.md)
+
+Интернет на телефоне через Bluetooth: ПК (с `nap.sh`) или Android-телефон с включённым
+«Bluetooth-модемом» раздаёт интернет, браузер, Java и эльфы ходят в сеть как через GPRS. На E71 не проверялось.
+
+## Что в папке
+
+| Файл | Что это |
+|---|---|
+| `bt-pan_ELKA.elf` | эльф |
+| `nap.sh` | для ПК |
+| `speedtest-pc.py` | сервер спидтеста (`nap.sh` запускает сам, лежать рядом) |
+| `patches/` | патчи для EL71, `patches/e71/` — для E71 |
+| `source/` | исходники |
+| `phone-manual/` | инструкции со скриншотами: GPRS-профиль, подключение эльфа |
+
+## Патчи (по порядку)
+
+1. `library-...vkp` — библиотека функций.
+2. `bt-pan-mtu...vkp` — обязательно.
+3. `btnet_...vkp` — нужен браузеру и эльфам. Без запущенного эльфа ничего не меняет.
+   Если эльф пишет «Old hook patch» — откатите `patches/old/...` и поставьте новый.
+
+## ПК
+
+1. Сопрягите телефон с ПК.
+2. Установите пакеты:
+   ```sh
+   sudo apt install -y bluez bluez-tools dnsmasq iptables python3
+   ```
+3. Запустите:
+   ```sh
+   sudo ./nap.sh        # остановить: ./nap.sh stop
+   ```
+
+## Телефон
+
+1. Нужен GPRS-профиль интернета (данные любые). Браузер и Java — на него.
+   Как создать: [phone-manual/how-to-setup-gprs.md](phone-manual/how-to-setup-gprs.md).
+2. Запустите эльф. Вкладка «Link»: «Computer» → выбрать ПК → «Connect».
+   По шагам со скриншотами: [phone-manual/how-to-setup-elf.md](phone-manual/how-to-setup-elf.md).
+3. Вкладка «Test» — спидтесты. Работают, только когда телефон подключён к ПК с запущенным `nap.sh`.
+4. «Disconnect» — разорвать связь, «Exit» — выйти.
+
+Настройки (ПК и автопереподключение) меняются прямо в эльфе, на вкладке «Link»,
+или в редакторе BCFG: `zbin\etc\BTPAN.bcfg`.
+
+## Ограничения
+
+- Пока эльф работает, Java по Bluetooth (JSR-82) не работает.
+- Пока эльф подключён к ПК, весь интернет телефона (браузер, Java, эльфы) идёт через ПК,
+  мобильный интернет (GPRS) не используется.
+- Если после «Disconnect» → «Connect» или перезапуска эльфа не работает —
+  перезагрузите телефон.
+- С SIM-картой не проверялось.
+
+## Сборка
+
+SDK ElfLoader 3 в `../sdk` относительно `source/`, в нём заменить
+`swilib/include/swilib/socket.h` файлом из `source/sdk-patch/`. Затем:
+
+```sh
+cd source && cmake -B build -S . && cmake --build build
+```

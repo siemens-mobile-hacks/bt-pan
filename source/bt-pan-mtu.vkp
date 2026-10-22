@@ -1,0 +1,113 @@
+; EL71sw45 Bluetooth PAN MTU 1500 - full RX and TX pool patch
+; L2CAP limit: 1696 bytes, requested BNEP MTU: 1691 bytes
+; EXPERIMENTAL: apply only to the exact EL71sw45 image.
+;
+; Keep the stock BT_RX_ACL_HEAP object count (26), but enlarge every object
+; from 0x1B4 to 0x704. MemOIni calculates and allocates the backing storage:
+;   old: 26 * align4(0x1B4 + 0x17) = 0x2EB8
+;   new: 26 * align4(0x704 + 0x17) = 0xB8D8
+;   delta = 0x8A20 (35360 bytes)
+;
+; This preserves the firmware's RX buffer-count flow control and normal free
+; path. It affects all Bluetooth profiles and uses a large partition even for
+; short ACL packets.
+
+; Keep the stock BT_TX_ACL_HEAP object count (36), but enlarge every object
+; from 0x174 to 0x704. Once L2CAP negotiates 1691, BTLP copies one complete
+; SDU into a TX ACL object before the lower layer fragments it for HCI. Leaving
+; the TX objects at 0x174 corrupts the partition free list on packets larger
+; than 335 bytes. The additional TX backing is 0xC840 (51264 bytes).
+; Total additional RX+TX backing is 0x15260 (86624 bytes, about 84.6 KiB).
+
+; HCI Host Buffer Size remains at the stock 0x0153 (339 bytes). This command
+; controls controller-to-host flow control and does not force the remote host
+; to fragment outgoing ACL packets. There is intentionally no patch entry for
+; it in this clean-image VKP. If the ELF reports code=A022/0622 and acl=1696,
+; an older experimental patch is still present in flash; apply the one-time
+; revert-hci-host-buffer.vkp and reboot.
+
+; BT_RX_ACL_HEAP object_size: 0x1B4 -> 0x704. object_count remains 0x1A.
+0x012E2040: B4010000 04070000
+
+; BT_TX_ACL_HEAP object_size: 0x174 -> 0x704. object_count remains 0x24.
+0x012E1FF4: 74010000 04070000
+
+; Generic RX allocator maximum SDU: 0x155 -> 0x6A0.
+; The unchanged instructions between these two addresses initialize r5.
+0x008C9FFC: FF21 D421
+0x008CA002: 5631 C900
+
+; Generic RX fixed-block allocation request: 0x1AC -> 0x700.
+; Every BT_RX_ACL_HEAP object is now 0x704 bytes.
+0x008CA06A: FF21AD31 07210902
+
+; BTOS adapter GetDataSizeRxAcl: 0x158 -> 0x6A8.
+; The lower Bluetooth transport uses this callback as the advertised capacity
+; of an incoming ACL buffer. 0x6A8 covers the 0x6A0 payload limit plus the
+; transport overhead and remains below the 0x700 fixed-block allocation.
+0x008BB3AE: FF205930 D520C000
+
+; Incoming HCI ACL primitive payload limits: 0x155 -> 0x6A0.
+; These checks run before L2CAP and otherwise discard a large ACL packet
+; before it can reach the RX allocator or the L2CAP reassembly path.
+; The first two entries raise the outer primitive-container limit and the
+; matching error-report value; the other two raise the type 4/5 payload
+; limits and the sizes passed to the generic RX allocator.
+0x00922E0C: FF205030 D420C000
+0x00922E38: FF225032 D422D200
+0x00923058: FF265636 D426F600
+0x009230DA: FF275637 D427FF00
+
+; LDA configuration validator: 335 -> 1696.
+0x00920718: FF225032 D422D200
+
+; RX L2CAP reassembly limit: 335 -> 1696.
+0x00922256: FF215031 D421C900
+
+; RX reassembly allocation size: 0x155 -> 0x6A0.
+; Shared by unsegmented packets and the first fragment of a segmented SDU.
+0x009221A8: FF205630 D420C000
+
+; Accept Linux non-flushable ACL fragmentation in BTLSAR.
+; Linux uses HCI PB=0 for the first fragment of a non-flushable L2CAP PDU.
+; The EL71 BTLSAR implementation accepts only PB=2 as a first fragment and
+; otherwise frees PB=0 before L2CAP sees it. Normalize PB=0 to PB=2 and then
+; resume the original comparison and table load. PB=1 continuations and PB=2
+; first fragments keep the firmware's original paths.
+0x009227F2: 02296D48 3AF313FA
+
+; BTLSAR aggregate limits: 0x15A -> 0x6A0. Both checks are required: one
+; guards continuation append, the other validates the completed aggregate.
+0x00922884: FF265B36 D426F600
+0x009228B2: FF265B36 D426F600
+
+; Thumb hook in an unreferenced FF gap. The load reproduces the original
+; `ldr r0, [0xA09229AC]`, whose literal value is 0xA8E647F8. The final cmp
+; supplies the flags consumed by the untouched branch at 0xA09227F6.
+0x00C5CC1C: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 002900D10221022900487047F847E6A8
+
+; JSApi connection RX queue allocation: 0x400 -> 0x800.
+0x00A0DEEC: 400EA0E3 800EA0E3
+
+; JSApi ring write modulo and capacity: 0x400 -> 0x800.
+0x00AED458: 2EEB8CE0 AEEA8CE0
+0x00AED45C: 4EE5A0E1 CEE5A0E1
+0x00AED460: 0EC54CE0 8EC54CE0
+0x00AED480: 400E5CE3 800E5CE3
+
+; JSApi ring read modulo: 0x400 -> 0x800.
+0x00AED4FC: 2EEB8CE0 AEEA8CE0
+0x00AED500: 4EE5A0E1 CEE5A0E1
+0x00AED504: 0EC54CE0 8EC54CE0
+
+; Make packet insertion into the JSApi ring atomic. The stock SApp callback
+; writes the two-byte packet length before attempting the payload. When the
+; payload does not fit, it leaves a prefix/partial SDU in the ring and pauses;
+; the packet reader can then neither consume it safely nor wake the producer.
+; The hook checks free space for length+2 before writing anything. On failure
+; it follows the stock short-write path, which sets paused and retries the
+; complete SDU after JSApi_ReadBytes drains an earlier packet.
+0x00A0ED74: 0400A001 AC3709EA
+
+; ARM hook in the remaining unreferenced FF gap after the BTLSAR Thumb stub.
+0x00C5CC2C: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF 010050E354C8F61A04C094E506C08CE002C08CE2020B5CE30500008A0400A0E10D10A0E10220A0E3B060CDE1F341FAEB49C8F6EA0040A0E34CC8F6EA
