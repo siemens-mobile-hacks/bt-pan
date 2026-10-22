@@ -54,7 +54,7 @@ static char log_buf[128];
  * from the GPRS PDP driver table A8E9E9CC[iface] (ENIP_IP_DRIVER, 0x2C each): +4 local ip,
  * +8 dns1, +C dns2; both DNS empty -> error 206B. Filled while PAN is up, restored after.
  */
-#define PDP_DRIVERS FW_SEL(0xA8E9E9CCu, 0xA8E9ECE0u)
+#define PDP_DRIVERS LIB_ENTRY(0x8471) /* RamPdpDrivers */
 #define PDP_DRIVER_COUNT 8u
 static volatile uint32_t *pdp_dns;
 static uint32_t pdp_saved[3];
@@ -472,15 +472,30 @@ static void contexts_release(void) {
 	UnlockSched();
 }
 
+/* The hooks VKP puts its three dispatchers at the same flash addresses on EL71 and E71 sw45
+ * (the hook sites jump there). Each starts with STMFD SP!,{R0-R6,LR}; LDR R0,[PC,#n]. */
+static int dispatcher_present(uint32_t address, uint32_t ldr) {
+	const volatile uint32_t *p = (const volatile uint32_t *)address;
+
+	return p[0] == 0xE92D407Fu && p[1] == ldr;
+}
+
+int hooks_patch_state(void) {
+	int lman = dispatcher_present(0xA15BFC00u, 0xE59F0098u);
+	int online = dispatcher_present(0xA15BFE00u, 0xE59F00B4u);
+	int avail = dispatcher_present(0xA15BF800u, 0xE59F00DCu); /* missing in the old VKP */
+
+	if (lman && online && avail)
+		return PATCH_OK;
+	if (!lman && !online && !avail)
+		return PATCH_NONE;
+	return PATCH_OLD;
+}
+
 static void dispatchers_log(void) {
-	/* entries of the flash dispatchers (hooks VKP), EL71 / E71 sw45 */
-	const uint8_t *l = (const uint8_t *)FW_SEL(0xA0974F78u, 0xA096B1F4u);
-	const uint8_t *o = (const uint8_t *)FW_SEL(0xA05FFCC8u, 0xA05FE63Cu);
-	const uint8_t *v = (const uint8_t *)FW_SEL(0xA05FF2AEu, 0xA05FDC22u);
-	int lman = *(uint32_t *)l == 0x47184B00u && *(uint32_t *)(l + 4) == 0xA15BFC00u;
-	int online = *(uint32_t *)o == 0x47184B00u && *(uint32_t *)(o + 4) == 0xA15BFE00u;
-	int avail = *(uint16_t *)v == 0x46c0 && *(uint16_t *)(v + 2) == 0x4b00 &&
-				*(uint16_t *)(v + 4) == 0x4718 && *(uint32_t *)(v + 6) == 0xA15BF800u;
+	int lman = dispatcher_present(0xA15BFC00u, 0xE59F0098u);
+	int online = dispatcher_present(0xA15BFE00u, 0xE59F00B4u);
+	int avail = dispatcher_present(0xA15BF800u, 0xE59F00DCu);
 
 	sprintf(log_buf, "LMAN: dispatchers lman=%d wsp-online=%d wsp-avail=%d%s\r\n", lman, online,
 			avail, lman && online && avail ? "" : " (browser/elfs need the hooks VKP)");

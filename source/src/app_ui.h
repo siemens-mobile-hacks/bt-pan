@@ -555,7 +555,7 @@ static void maincsm_onclose(CSM_RAM *data) {
 	/* the device-list accessor and the BTA helper process must go before the elf unloads */
 	if (process_created && GetGBSProcAddress(BT_PANU_PROCESS_CEPID)) {
 		peers_stop(); /* a queued message would die with the process */
-		KillGBSprocDirect(BT_PANU_PROCESS_CEPID);
+		KillGBSproc(BT_PANU_PROCESS_CEPID);
 		process_created = false;
 	}
 	kill_elf();

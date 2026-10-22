@@ -18,7 +18,9 @@ tethering» on shares its connection, and the browser, Java and elfs go online a
 
 ## Patches (in this order)
 
-1. `library-...vkp` — function library.
+1. `library-...vkp` — function library. The elf takes every firmware function from it (entries 420–471).
+   If an older version of this library is installed, undo it and install the new one;
+   otherwise the elf reports at startup that the library doesn't fit.
 2. `bt-pan-mtu...vkp` — required.
 3. `btnet_...vkp` — needed by the browser and elfs. Changes nothing while the elf isn't running.
    If the elf says «Old hook patch», undo `patches/old/...` and install the new one.

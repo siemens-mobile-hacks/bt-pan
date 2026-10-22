@@ -8,7 +8,7 @@
 #include <string.h>
 
 #include "build_id.h"
-#include "fw.h"
+#include "lib.h"
 #include "bt_panu.h"
 #include "bt_pan_netif.h"
 #include "config.h"
@@ -18,10 +18,7 @@
 #include "speedtest.h"
 #include "usart.h"
 
-/* SWI 0x38E is unresolved on ELKA; call the firmware implementation. */
-#define CreateICLDirect ((void (*)(PGROUP *))FW_THUMB(0xa0092450u))
-#define GBS_GetProcGroupDirect ((PGROUP * (*)(uint16_t)) FW_THUMB(0xa0095128u))
-#define KillGBSprocDirect ((void (*)(int))FW_THUMB(0xa0096140u))
+#define GetProcGroup ((PGROUP * (*)(int)) LIB_ENTRY(0x463)) /* GBS_GetProcGroup */
 
 /* A private process group keeps BTA messages away from the ELF helper queue. */
 #define BT_PANU_PROCESS_GROUP 0x1au
@@ -293,8 +290,8 @@ static int create_process(void) {
 		return 0;
 	}
 
-	if (!GBS_GetProcGroupDirect(BT_PANU_PROCESS_CEPID))
-		CreateICLDirect(&group);
+	if (!GetProcGroup(BT_PANU_PROCESS_CEPID))
+		CreateICL(&group);
 	CreateGBSproc(BT_PANU_PROCESS_CEPID, "BTPAN", process_messages, 0x80, 0);
 	if (!GetGBSProcAddress(BT_PANU_PROCESS_CEPID)) {
 		usart_puts("Cannot create BTPAN GBS process\r\n");
@@ -359,30 +356,12 @@ static void finish_poc(GBSTMR *timer) {
 	}
 
 	if (process_created && GetGBSProcAddress(BT_PANU_PROCESS_CEPID)) {
-		KillGBSprocDirect(BT_PANU_PROCESS_CEPID);
+		KillGBSproc(BT_PANU_PROCESS_CEPID);
 		process_created = false;
 	}
 
 	usart_puts("BT PANU: kill_elf\r\n");
 	kill_elf();
-}
-
-/* The hooks VKP in flash (patches/): our gateway serves its three hooks. An older version has
- * only the first two (no WSP availability hook at 005FF2AE); connecting is refused then. */
-enum { PATCH_OK, PATCH_NONE, PATCH_OLD };
-static int hooks_patch_state(void) {
-	static const uint8_t lman[] = {0x00, 0x4B, 0x18, 0x47, 0x00, 0xFC, 0x5B, 0xA1};
-	static const uint8_t wsp_online[] = {0x00, 0x4B, 0x18, 0x47, 0x00, 0xFE, 0x5B, 0xA1};
-	static const uint8_t wsp_avail[] = {0xC0, 0x46, 0x00, 0x4B, 0x18, 0x47, 0x00, 0xF8, 0x5B, 0xA1};
-	bool a = !memcmp((const void *)FW_SEL(0xA0974F78u, 0xA096B1F4u), lman, sizeof(lman));
-	bool b = !memcmp((const void *)FW_SEL(0xA05FFCC8u, 0xA05FE63Cu), wsp_online, sizeof(wsp_online));
-	bool c = !memcmp((const void *)FW_SEL(0xA05FF2AEu, 0xA05FDC22u), wsp_avail, sizeof(wsp_avail));
-
-	if (a && b && c)
-		return PATCH_OK;
-	if (!a && !b && !c)
-		return PATCH_NONE;
-	return PATCH_OLD;
 }
 
 /* Turn PAN on. Re-inits the stacks each time so a stop/start cycle is clean. */
@@ -394,7 +373,7 @@ static int AppStartPan(void) {
 		return -1;
 	}
 	if (hooks_patch_state() == PATCH_OLD) {
-		usart_puts("BT PAN: old hooks VKP in flash (no 005FF2AE hook): "
+		usart_puts("BT PAN: old hooks VKP in flash (no WSP availability hook): "
 				   "install the one from the release patches\r\n");
 		return -1;
 	}
@@ -433,15 +412,12 @@ int main(char *exe, char *fname, void *p1) {
 	usart_init();
 	usart_set_speed(115200);
 	usart_puts("\r\n--- BT PAN ENIP " BT_PAN_BUILD_TAG " ---\r\n");
-	if (fw_detect() == FW_UNKNOWN) {
-		usart_puts("BT PAN: unknown firmware (need EL71 or E71 sw45)\r\n");
-		ShowMSG(1, (int)"BT PAN: needs EL71 or E71 sw45");
+	if (lib_check()) {
+		usart_puts("BT PAN: function library has no entries for this elf\r\n");
+		ShowMSG(1, (int)"BT PAN: install the function library from the release patches");
 		SUBPROC((void *)kill_elf);
 		return 0;
 	}
-	usart_puts("BT PAN: firmware ");
-	usart_puts((char *)fw_model_name());
-	usart_puts(" sw45\r\n");
 	pan_lman_init(); /* socket helper registration, so apps' contexts can be pinned */
 
 	config_load();

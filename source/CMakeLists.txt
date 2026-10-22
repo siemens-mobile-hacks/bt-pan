@@ -18,7 +18,7 @@ set(SOURCES
 	src/bt_pan_netif.c
 	src/pan_lman.c
 	src/peers.c
-	src/fw.c
+	src/lib.c
 	src/speedtest.c
 	src/usart.c
 	src/freestanding.c

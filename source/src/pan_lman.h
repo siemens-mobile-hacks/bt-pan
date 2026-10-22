@@ -19,4 +19,9 @@ void pan_lman_poll(void);
 /* Helper process, before the stack speed test's socket(): make sure the helper has a context. */
 void pan_lman_test_begin(void);
 
+/* The hooks VKP in flash (patches/): our gateway serves its three hooks. An older version has
+ * only the first two (no WSP availability hook); connecting is refused then. */
+enum { PATCH_OK, PATCH_NONE, PATCH_OLD };
+int hooks_patch_state(void);
+
 #endif

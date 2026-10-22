@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "fw.h"
+#include "lib.h"
 #include "sapp.h"
 
 #define BT_PSM_BNEP 0x000fu
@@ -160,54 +160,19 @@ typedef int JSAPI_WRITE_PROC(BT_HANDLE, const void *, uint32_t);
 typedef int JSAPI_CLEAR_HANDLE_PROC(BT_HANDLE);
 typedef void L2CA_READ_DATA_PROC(const L2CA_READ_DATA_REQ *);
 
-#define BTA_Accessor_New ((BTA_ACCESSOR_NEW_PROC *)FW_T(0xa07dd994u, 0xa07c5f84u))
-#define GBS_GetMessagePayload ((void *(*)(void *))FW_THUMB(0xa0091d18u))
-#define BTA_Accessor_MapObjectMessage ((BTA_MAP_MESSAGE_PROC *)FW_T(0xa07dd9cau, 0xa07c5fbau))
-#define BTA_Accessor_Delete ((BTA_ACCESSOR_DELETE_PROC *)FW_T(0xa07ddd2cu, 0xa07c631cu))
-#define BT_GetLocalAddress ((BT_GET_LOCAL_ADDRESS_PROC *)FW_T(0xa0643e5au, 0xa064222au))
-#define BTA_DeviceDiscovery_StartSearchReq ((BTA_REQUEST_3_PROC *)FW_T(0xa07dddd4u, 0xa07c63c4u))
-#define BTA_DeviceDiscovery_StartSearchCodReq ((BTA_DISCOVERY_COD_PROC *)FW_T(0xa07dde70u, 0xa07c6460u))
-#define BTA_DeviceDiscovery_StopSearchReq ((BTA_REQUEST_2_PROC *)FW_T(0xa07ddfaau, 0xa07c659au))
-#define BTA_RemBtDeviceInfo_GetAddress ((BTA_GET_REMOTE_ADDRESS_PROC *)FW_T(0xa07e0756u, 0xa07c8d46u))
-#define BTA_RemBtDeviceInfo_GetName ((BTA_GET_REMOTE_NAME_PROC *)FW_T(0xa07e07c6u, 0xa07c8db6u))
-#define BTA_RemBtDeviceInfo_SetName ((BTA_SET_REMOTE_NAME_PROC *)FW_T(0xa07e09e2u, 0xa07c8fd2u))
-#define BTA_RemBtDeviceInfo_GetDeviceClass ((BTA_GET_DEVICE_CLASS_PROC *)FW_T(0xa07e0a6cu, 0xa07c905cu))
-#define BTA_LocBtDevice_SetVisibilityReq ((BTA_REQUEST_3_PROC *)FW_T(0xa07e01acu, 0xa07c879cu))
-#define BTA_LocBtDevice_SetDIACReq ((BTA_REQUEST_3_PROC *)FW_T(0xa07e0238u, 0xa07c8828u))
-#define BTA_LocBtDevice_SetNameReq ((void (*)(BT_HANDLE, const char *, BT_TRANSACTION_ID))FW_T(0xa07e02c4u, 0xa07c88b4u))
-#define BTA_Conn_New_RFCOMM ((BTA_NEW_RFCOMM_PROC *)FW_T(0xa07debceu, 0xa07c71beu))
-#define BTA_Conn_New_L2CAP ((BTA_NEW_L2CAP_PROC *)FW_T(0xa07dec9cu, 0xa07c728cu))
-#define BTA_Conn_CloseReq ((BTA_CONN_REQUEST_PROC *)FW_T(0xa07ded82u, 0xa07c7372u))
-#define BTA_Conn_GetSapiApp ((BTA_GET_SAPI_PROC *)FW_T(0xa07df10eu, 0xa07c76feu))
-#define BTA_Conn_GetL2CAPParamReq ((BTA_CONN_REQUEST_PROC *)FW_T(0xa07df190u, 0xa07c7780u))
-#define BTA_Conn_GetRemDevInfo ((BTA_GET_REMOTE_INFO_PROC *)FW_T(0xa07df232u, 0xa07c7822u))
-#define BTA_RemBtDeviceInfo_GetStatus ((BTA_GET_REMOTE_STATUS_PROC *)FW_T(0xa07e0aecu, 0xa07c90dcu))
-#define BTA_vBtAclDisconnectReq ((BTA_ACL_DISCONNECT_PROC *)FW_T(0xa0918886u, 0xa090eb02u))
-#define BTA_Server_New ((BTA_SERVER_NEW_PROC *)FW_T(0xa07de5e4u, 0xa07c6bd4u))
-#define BTA_Server_StartReq ((BTA_SERVER_START_PROC *)FW_T(0xa07de6e0u, 0xa07c6cd0u))
-#define BTA_Server_AcceptReq ((BTA_SERVER_ACCEPT_PROC *)FW_T(0xa07de83au, 0xa07c6e2au))
-#define BTA_Server_StopReq ((BTA_CONN_REQUEST_PROC *)FW_T(0xa07de8eeu, 0xa07c6edeu))
-#define BTA_Server_Delete ((void (*)(BT_HANDLE, BT_HANDLE))FW_T(0xa07dea80u, 0xa07c7070u))
-#define BTA_ServiceSearch_StartReq ((BTA_SERVICE_SEARCH_PROC *)FW_T(0xa07de1f6u, 0xa07c67e6u))
-#define BTA_ServiceSearch_RetrieveServiceReq ((BTA_SERVICE_SEARCH_PROC *)FW_T(0xa07de31cu, 0xa07c690cu))
-#define BTA_ServiceSearch_StopReq ((BTA_CONN_REQUEST_PROC *)FW_T(0xa07de43eu, 0xa07c6a2eu))
-#define BTA_Sdp_Converter_New ((void (*)(BT_HANDLE, uint32_t, uint32_t, uint32_t))FW_T(0xa07df3ccu, 0xa07c79bcu))
-#define JSApi_ConnectionsList (*(JSApi_Handle_t **)FW_SEL(0xa0a0d908u, 0xa0a03b5cu))
-#define JSApi_CurrentHandleID ((JSAPI_CURRENT_HANDLE_PROC *)FW_A(0xa0a0d77cu, 0xa0a039d0u))
-#define JSApi_InitHandles ((JSAPI_INIT_HANDLES_PROC *)FW_A(0xa0a0eb44u, 0xa0a04d98u))
-#define JSApi_RegisterConHandle ((JSAPI_REGISTER_HANDLE_PROC *)FW_A(0xa0a0de1cu, 0xa0a04070u))
-#define JSApi_GetConnectionState ((JSAPI_GET_STATE_PROC *)FW_A(0xa0a0e1c8u, 0xa0a0441cu))
-#define JSApi_ReadBytes ((JSAPI_READ_PROC *)FW_A(0xa0a0d7b0u, 0xa0a03a04u))
-#define JSApi_BytesAvailable ((JSAPI_AVAILABLE_PROC *)FW_A(0xa0a0dc60u, 0xa0a03eb4u))
-#define JSApi_WriteBytes ((JSAPI_WRITE_PROC *)FW_A(0xa0a0db68u, 0xa0a03dbcu))
-#define JSApi_ClearConnectionHandle ((JSAPI_CLEAR_HANDLE_PROC *)FW_A(0xa0a0e440u, 0xa0a04694u))
-#define BTLP_InitL2CAP_IO ((void (*)(void))FW_T(0xa08d1f00u, 0xa08c8ae0u))
-#define BTLP_uiSendDataOverBT ((int (*)(int, uint32_t, int))FW_T(0xa08d10acu, 0xa08c7c8cu))
-#define BTLP_vDataToAppCallback ((void (*)(int))FW_T(0xa08d117au, 0xa08c7d5au))
-#define BTLP_vFlushBuffer ((void (*)(int, int))FW_T(0xa08d2026u, 0xa08c8c06u))
-#define BTLP_Connections ((volatile BTLP_CONNECTION *)FW_SEL(0xa8da5500u, 0xa8da5674u))
-#define L2CAP_ChannelState ((volatile L2CAP_CHANNEL_STATE *)FW_SEL(0xa8da2080u, 0xa8da21f4u))
-#define L2CA_ReadDataReq ((L2CA_READ_DATA_PROC *)FW_T(0xa08c8848u, 0xa08bf428u))
+#define BTA_Accessor_New ((BTA_ACCESSOR_NEW_PROC *)LIB_ENTRY(0x420))
+#define GBS_GetMessagePayload ((void *(*)(void *))LIB_ENTRY(0x423))
+#define BTA_Accessor_MapObjectMessage ((BTA_MAP_MESSAGE_PROC *)LIB_ENTRY(0x422))
+#define BTA_Accessor_Delete ((BTA_ACCESSOR_DELETE_PROC *)LIB_ENTRY(0x421))
+#define BT_GetLocalAddress ((BT_GET_LOCAL_ADDRESS_PROC *)LIB_ENTRY(0x42D))
+#define BTA_RemBtDeviceInfo_GetAddress ((BTA_GET_REMOTE_ADDRESS_PROC *)LIB_ENTRY(0x44B))
+#define BTA_RemBtDeviceInfo_GetName ((BTA_GET_REMOTE_NAME_PROC *)LIB_ENTRY(0x44C))
+#define BTA_Conn_New_L2CAP ((BTA_NEW_L2CAP_PROC *)LIB_ENTRY(0x433))
+#define BTA_Conn_CloseReq ((BTA_CONN_REQUEST_PROC *)LIB_ENTRY(0x42C))
+#define BTA_Conn_GetL2CAPParamReq ((BTA_CONN_REQUEST_PROC *)LIB_ENTRY(0x45F))
+#define BTA_Conn_GetRemDevInfo ((BTA_GET_REMOTE_INFO_PROC *)LIB_ENTRY(0x460))
+#define BTA_RemBtDeviceInfo_GetStatus ((BTA_GET_REMOTE_STATUS_PROC *)LIB_ENTRY(0x461))
+#define BTA_vBtAclDisconnectReq ((BTA_ACL_DISCONNECT_PROC *)LIB_ENTRY(0x462))
 
 static inline void bt_bdaddr_from_mac(BT_BD_ADDR *address, const uint8_t mac[6]) {
 	unsigned int i;

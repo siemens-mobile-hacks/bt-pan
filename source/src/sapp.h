@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "fw.h"
+#include "lib.h"
 
 typedef struct SApp_IO SApp_IO;
 
@@ -88,11 +88,5 @@ _Static_assert(offsetof(VioHandlerMethods, CloseIO) == 0x0c, "VioHandlerMethods.
 _Static_assert(offsetof(VioHandlerMethods, GetConnectedSDev) == 0x10, "VioHandlerMethods.GetConnectedSDev offset");
 #endif
 
-#define SApp_Init_IO ((SAPP_INIT_IO_PROC *)FW_T(0xa04c6ce8u, 0xa04c0920u))
-#define SApp_Register ((SAPP_REGISTER_PROC *)FW_T(0xa04c6f34u, 0xa04c0b6cu))
-#define ConnSDevSApp ((CONN_SDEV_SAPP_PROC *)FW_T(0xa04c700cu, 0xa04c0c44u))
-#define CHConnSApp ((CHANGE_CONN_SAPP_PROC *)FW_T(0xa04c734cu, 0xa04c0f84u))
-#define Serial_CanOpenSApp ((SERIAL_CAN_OPEN_SAPP_PROC *)FW_T(0xa04c786cu, 0xa04c14a4u))
-#define Ca_SasSApp_Init ((CA_SAS_SAPP_INIT_PROC *)FW_T(0xa065bb72u, 0xa0659f42u))
 
 #endif
