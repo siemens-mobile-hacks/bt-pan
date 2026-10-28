@@ -30,10 +30,19 @@ void usart_set_speed(uint32_t baudrate) {
 	usart_calc_bg_fdv(baudrate, &bg, &fdv);
 
 	LockSched();
+#ifndef SGOLD
 	USART_CLC(USART0) = 1 << MOD_CLC_RMC_SHIFT;
+#endif
 	USART_CON(USART0) &= ~USART_CON_CON_R;
+#ifdef SGOLD
+	/* the 52 MHz module clock is NewSGOLD's; PMB8875's is not verified: keep the speed the
+	 * firmware's AT port autobauded to (send AT at 115200 before starting the elf) */
+	(void)bg;
+	(void)fdv;
+#else
 	USART_BG(USART0) = bg;
 	USART_FDV(USART0) = fdv;
+#endif
 	USART_CON(USART0) = USART_CON_CON_R | USART_CON_REN | USART_CON_FDE | USART_CON_M_ASYNC_8BIT;
 	UnlockSched();
 }

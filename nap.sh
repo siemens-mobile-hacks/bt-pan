@@ -13,6 +13,8 @@ if [ "$1" = "stop" ]; then
 	sudo iptables -t nat -D POSTROUTING -s $NET.0/24 -j MASQUERADE 2>/dev/null || true
 	sudo iptables -D FORWARD -i $BR -j ACCEPT 2>/dev/null || true
 	sudo iptables -D FORWARD -o $BR -j ACCEPT 2>/dev/null || true
+	sudo iptables -t mangle -D FORWARD -o $BR -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+	sudo iptables -t mangle -D FORWARD -i $BR -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 	sudo ip link delete $BR 2>/dev/null || true
 	echo "BT PAN host stopped"
 	exit 0
@@ -27,13 +29,21 @@ sudo ip link delete $BR 2>/dev/null || true
 sudo ip link add $BR type bridge
 sudo ip addr add $NET.1/24 dev $BR
 sudo ip link set $BR up
-sudo ip link set $BR mtu 1500
+# MTU=320 ./nap.sh for S65 without bt-pan-mtu_S65v58.vkp (L2CAP MTU 335)
+sudo ip link set $BR mtu ${MTU:-1500}
 
 sudo sysctl -w net.ipv4.ip_forward=1
 sudo iptables -t nat -C POSTROUTING -s $NET.0/24 -j MASQUERADE 2>/dev/null || \
 	sudo iptables -t nat -A POSTROUTING -s $NET.0/24 -j MASQUERADE
 sudo iptables -C FORWARD -i $BR -j ACCEPT 2>/dev/null || sudo iptables -A FORWARD -i $BR -j ACCEPT
 sudo iptables -C FORWARD -o $BR -j ACCEPT 2>/dev/null || sudo iptables -A FORWARD -o $BR -j ACCEPT
+# small MTU: TCP from the internet must not exceed it
+if [ "${MTU:-1500}" -lt 1500 ]; then
+	sudo iptables -t mangle -C FORWARD -o $BR -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+		sudo iptables -t mangle -A FORWARD -o $BR -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+	sudo iptables -t mangle -C FORWARD -i $BR -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+		sudo iptables -t mangle -A FORWARD -i $BR -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+fi
 
 sudo dnsmasq \
 	--interface=$BR --bind-interfaces --except-interface=lo \

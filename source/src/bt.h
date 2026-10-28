@@ -174,6 +174,32 @@ typedef void L2CA_READ_DATA_PROC(const L2CA_READ_DATA_REQ *);
 #define BTA_RemBtDeviceInfo_GetStatus ((BTA_GET_REMOTE_STATUS_PROC *)LIB_ENTRY(0x461))
 #define BTA_vBtAclDisconnectReq ((BTA_ACL_DISCONNECT_PROC *)LIB_ENTRY(0x462))
 
+#ifdef SGOLD
+#include "bt_sg.h"
+
+/* swilib/bluetooth.h declares these for ELKA only; S65 has the same SDev layout (SDev_InitEndpoint
+ * A123AC20 fills fn[15], type +3C, inst +40, app +44, index +48; SDEV_APP called as on EL71). */
+typedef struct SDEV {
+	void *fn[15];
+	uint8_t type;
+	int inst;
+	uint8_t app;
+	int index;
+} SDEV;
+
+typedef struct SDEV_APP {
+	int (*open)(SDEV **ep, int dev_type, const uint8_t *info);
+	void (*reg)(SDEV *dev, const void *info);
+	void *unk;
+	void (*close)(int index);
+	int (*get_dev)(int index, int *inst);
+} SDEV_APP;
+
+#define SDev_InitEndpoint ((void (*)(SDEV *))LIB_ENTRY(0x42E))
+#define RamSDevApps() ((void **)LIB_ENTRY(0x8431))
+#define RamBtBufferPool() ((uint16_t *)LIB_ENTRY(0x8432))
+#endif
+
 static inline void bt_bdaddr_from_mac(BT_BD_ADDR *address, const uint8_t mac[6]) {
 	unsigned int i;
 

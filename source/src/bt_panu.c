@@ -1,4 +1,5 @@
 #include "bt_panu.h"
+#include "trace.h"
 
 #include <stddef.h>
 #include <stdio.h>
@@ -227,7 +228,9 @@ int bt_panu_send(struct bt_panu *panu, const uint8_t *data, size_t len) {
 		return 0;
 
 	/* L2CAP takes a whole SDU or nothing */
+	WHERE("sdev write", len);
 	written = ((int (*)(const uint8_t *, int, int))dev->fn[2])(data, (int)len, dev->inst);
+	WHERE("sdev write done", written);
 	if (written < (int)len) {
 		sprintf(panu->log_buf, "BNEP TX %u -> %d (pool tx %u)\r\n", (unsigned int)len, written,
 				(unsigned int)POOL_TX_FREE());
@@ -365,18 +368,20 @@ static void bt_panu_send_setup(GBSTMR *timer) {
 	GBS_StartTimerProc(&panu->setup_timer, sent ? 216 : 22, bt_panu_send_setup);
 }
 
-static void bt_panu_connection_opened(struct bt_panu *panu, BT_ACCESSOR_MESSAGE *event) {
+static void bt_panu_connection_opened(struct bt_panu *panu, BT_HANDLE conn, unsigned result,
+									  unsigned type) {
 	bool stopping = panu->state == BT_PANU_STATE_STOPPING;
 
-	sprintf(panu->log_buf, "BT open: conn=%04X result=%04X type=%02X dev=%s app=%X\r\n",
-			event->object_handle, event->result,
-			event->parameter.connection_open.connection_type, sdev ? "yes" : "no", sdev_last_app);
+	sprintf(panu->log_buf, "BT open: conn=%04X result=%04X type=%02X dev=%s app=%X\r\n", conn,
+			result, type, sdev ? "yes" : "no", sdev_last_app);
 	usart_puts(panu->log_buf);
-	if (event->result != 0)
+	if (result != 0)
 		return;
 
-	panu->conn = event->object_handle;
+	panu->conn = conn;
+#ifndef SGOLD
 	panu->remote_device = BTA_Conn_GetRemDevInfo(panu->accessor, panu->conn);
+#endif
 	if (stopping)
 		return;
 
@@ -388,7 +393,9 @@ static void bt_panu_connection_opened(struct bt_panu *panu, BT_ACCESSOR_MESSAGE 
 	sprintf(panu->log_buf, "pool tx %u rx %u\r\n", (unsigned int)panu->pool_tx_base,
 			(unsigned int)panu->pool_rx_base);
 	usart_puts(panu->log_buf);
+#ifndef SGOLD
 	BTA_Conn_GetL2CAPParamReq(panu->accessor, panu->conn, ++panu->transaction_id);
+#endif
 	GBS_StartTimerProc(&panu->rx_timer, BT_PANU_RX_POLL_TICKS, bt_panu_poll_rx);
 	GBS_StartTimerProc(&panu->setup_timer, 22, bt_panu_send_setup);
 }
@@ -413,10 +420,26 @@ static void bt_panu_connect(struct bt_panu *panu) {
 	sprintf(panu->log_buf, "L2CAP params: rxMTU=%u txMTU=%u enc=0 auth=0\r\n", panu->config.rx_mtu,
 			panu->config.tx_mtu);
 	usart_puts(panu->log_buf);
+#ifdef SGOLD
+	{
+		void *remdev = CA_RemDev_New(&peer_addr);
+
+		if (!remdev) {
+			usart_puts("RemDev_New failed\r\n");
+			panu->state = BT_PANU_STATE_IDLE;
+			return;
+		}
+		panu->conn = CA_L2CAP_New(panu->accessor, remdev, BT_SAPI_TYPE_L2CAP, BT_PSM_BNEP, 0, 0, 0,
+								  panu->config.rx_mtu, panu->config.tx_mtu);
+		CA_RemDev_Free(remdev);
+	}
+	sprintf(panu->log_buf, "L2CAP_New(psm=000F) -> %04X\r\n", panu->conn);
+#else
 	panu->conn =
 		BTA_Conn_New_L2CAP(panu->accessor, &peer_addr, BT_SAPI_TYPE_L2CAP, BT_PSM_BNEP, 0, 0, 0,
 						   panu->config.rx_mtu, panu->config.tx_mtu, ++panu->transaction_id);
 	sprintf(panu->log_buf, "BTA_Conn_New_L2CAP(psm=000F) -> %04X\r\n", panu->conn);
+#endif
 	usart_puts(panu->log_buf);
 	if (panu->conn == BT_INVALID_HANDLE || panu->conn == 0xffffu) {
 		panu->conn = BT_INVALID_HANDLE;
@@ -424,6 +447,12 @@ static void bt_panu_connect(struct bt_panu *panu) {
 	}
 }
 
+#ifdef SGOLD
+/* No ACL disconnect request found on S65: the stack drops the ACL link itself when idle. */
+static void bt_panu_disconnect_acl(struct bt_panu *panu) {
+	(void)panu;
+}
+#else
 static void bt_panu_acl_disconnect_timeout(GBSTMR *timer) {
 	struct bt_panu *panu = container_of(timer, struct bt_panu, acl_timer);
 	uint32_t status;
@@ -477,6 +506,7 @@ static void bt_panu_disconnect_acl(struct bt_panu *panu) {
 	GBS_StartTimerProc(&panu->acl_timer, BT_PANU_ACL_DISCONNECT_POLL_TICKS,
 					   bt_panu_acl_disconnect_timeout);
 }
+#endif
 
 /*
  * Closing: stop writing, keep draining received packets, and close only once the shared send
@@ -495,11 +525,16 @@ static void bt_panu_close_step(GBSTMR *timer) {
 			GBS_StartTimerProc(&panu->close_timer, BT_PANU_DRAIN_TICKS, bt_panu_close_step);
 			return;
 		}
-		sprintf(panu->log_buf, "BTA_Conn_CloseReq(conn=%04X) pool tx %u of %u\r\n", panu->conn,
+		sprintf(panu->log_buf, "Conn close(conn=%04X) pool tx %u of %u\r\n", panu->conn,
 				(unsigned int)POOL_TX_FREE(), (unsigned int)panu->pool_tx_base);
 		usart_puts(panu->log_buf);
 		panu->close_sent = true;
+#ifdef SGOLD
+		if (!CA_Conn_Close(panu->conn, panu->accessor))
+			usart_puts("Conn_Close refused\r\n");
+#else
 		BTA_Conn_CloseReq(panu->accessor, panu->conn, ++panu->transaction_id);
+#endif
 		GBS_StartTimerProc(&panu->close_timer, 216, bt_panu_close_step);
 		return;
 	}
@@ -537,6 +572,25 @@ int bt_panu_start(struct bt_panu *panu) {
 	sprintf(panu->log_buf, "BT pool at start: rx %u tx %u\r\n", (unsigned int)POOL_RX_FREE(),
 			(unsigned int)POOL_TX_FREE());
 	usart_puts(panu->log_buf);
+#ifdef SGOLD
+	panu->accessor = CA_MR_New(panu->config.owner_cepid, (int)panu->config.message_id, "btpan", 1);
+	sprintf(panu->log_buf, "MR_New -> %04X\r\n", panu->accessor);
+	usart_puts(panu->log_buf);
+	if (!ca_handle_ok(panu->accessor)) {
+		panu->accessor = BT_INVALID_HANDLE;
+		return -1;
+	}
+	/* as JBT: all events of SAPI connections (open failed, opened, closed, parameters) */
+	{
+		static const uint8_t codes[] = {CA_SAPI_PARAMETERS, CA_SAPI_CLOSED, CA_SAPI_OPEN_FAILED,
+										CA_SAPI_OPENED};
+		unsigned i;
+
+		for (i = 0; i < sizeof(codes); ++i)
+			CA_MR_Subscribe(panu->accessor, codes[i], CA_SapiConnClass());
+	}
+	local_addr = (const BT_BD_ADDR *)bt_sg_local_addr();
+#else
 	panu->accessor = BTA_Accessor_New(panu->config.owner_cepid, panu->config.message_id, 0);
 	sprintf(panu->log_buf, "BTA_Accessor_New -> %04X\r\n", panu->accessor);
 	usart_puts(panu->log_buf);
@@ -544,6 +598,7 @@ int bt_panu_start(struct bt_panu *panu) {
 		return -1;
 
 	local_addr = BT_GetLocalAddress();
+#endif
 	if (!local_addr) {
 		usart_puts("BT_GetLocalAddress failed\r\n");
 		return -1;
@@ -557,11 +612,96 @@ int bt_panu_start(struct bt_panu *panu) {
 	}
 
 	bt_panu_log_addr(panu, "target host", panu->config.peer_addr);
-	usart_puts("Waiting for BTA accessor start confirmation\r\n");
 	panu->state = BT_PANU_STATE_STARTING;
+#ifdef SGOLD
+	bt_panu_connect(panu); /* an MR has no start confirmation */
+#else
+	usart_puts("Waiting for BTA accessor start confirmation\r\n");
+#endif
 	return 0;
 }
 
+static void bt_panu_open_failed(struct bt_panu *panu, unsigned result, unsigned detail) {
+	sprintf(panu->log_buf,
+			"L2CAP open failed: result=%04X layer=%02X sdev open=%u reg=%u close=%u "
+			"app=%X type=%X info=%02X %02X %02X %02X %02X %02X\r\n",
+			result, detail, sdev_opens, sdev_regs, sdev_closes, sdev_last_app, sdev_last_type,
+			sdev_last_info[0], sdev_last_info[1], sdev_last_info[2], sdev_last_info[3],
+			sdev_last_info[4], sdev_last_info[5]);
+	usart_puts(panu->log_buf);
+	panu->conn = BT_INVALID_HANDLE;
+	panu->remote_device = NULL;
+	if (panu->state != BT_PANU_STATE_STOPPING)
+		panu->state = BT_PANU_STATE_IDLE;
+	if (panu->config.cb && panu->config.cb->disconnected)
+		panu->config.cb->disconnected(panu, panu->config.user_data);
+}
+
+static void bt_panu_closed(struct bt_panu *panu, bool by_peer) {
+	bt_panu_stop_timer(&panu->rx_timer);
+	bt_panu_stop_timer(&panu->setup_timer);
+	bt_panu_stop_timer(&panu->close_timer);
+	panu->conn = BT_INVALID_HANDLE;
+	bt_panu_disconnect_acl(panu);
+	if (panu->state != BT_PANU_STATE_STOPPING)
+		panu->state = BT_PANU_STATE_IDLE;
+	usart_puts(by_peer ? "L2CAP/BNEP closed by the PC\r\n" : "L2CAP/BNEP closed\r\n");
+	if (panu->config.cb && panu->config.cb->disconnected)
+		panu->config.cb->disconnected(panu, panu->config.user_data);
+}
+
+#ifdef SGOLD
+/* {msg, submess = MR, data0 = object message}; every one goes back to the MR (MR_Done). */
+void bt_panu_handle_bta_msg(struct bt_panu *panu, GBS_MSG *msg) {
+	CA_OBJECT_MESSAGE *event = msg->data0;
+	BT_HANDLE mr = (BT_HANDLE)msg->submess;
+
+	if (!event) {
+		usart_puts("MR message without event object\r\n");
+		return;
+	}
+	sprintf(panu->log_buf, "CA event class=%02X code=%02X object=%04X result=%04X p=%04X/%02X\r\n",
+			event->object_class, event->object_message, event->object_handle, event->result,
+			event->param_1c, event->param_1e);
+	usart_puts(panu->log_buf);
+	if (mr != panu->accessor) {
+		CA_MR_Done(mr, event);
+		return;
+	}
+	if (event->object_class == CA_MR_Class()) {
+		if (event->object_message == CA_MR_STOPPED) {
+			usart_puts("MR stopped, released\r\n");
+			CA_Release(panu->accessor);
+			panu->accessor = BT_INVALID_HANDLE; /* JBT hands the event back with FFFE too */
+			panu->mr_stopping = false;
+		}
+	} else if (event->object_class == CA_SapiConnClass() && panu->conn != BT_INVALID_HANDLE &&
+			   event->object_handle == panu->conn) { /* the class is shared with Java's */
+		switch (event->object_message) {
+			case CA_SAPI_OPEN_FAILED:
+				bt_panu_open_failed(panu, event->result, 0);
+				break;
+			case CA_SAPI_OPENED:
+				if (event->result)
+					bt_panu_open_failed(panu, event->result, 0);
+				else
+					bt_panu_connection_opened(panu, event->object_handle, 0, event->param_1e);
+				break;
+			case CA_SAPI_PARAMETERS:
+				sprintf(panu->log_buf, "L2CAP negotiated: %u/%u\r\n", event->param_1c,
+						event->param_1e);
+				usart_puts(panu->log_buf);
+				break;
+			case CA_SAPI_CLOSED:
+				bt_panu_closed(panu, !panu->close_sent);
+				break;
+			default:
+				break;
+		}
+	}
+	CA_MR_Done(panu->accessor, event);
+}
+#else
 void bt_panu_handle_bta_msg(struct bt_panu *panu, GBS_MSG *msg) {
 	BT_ACCESSOR_GBS_PAYLOAD *payload = GBS_GetMessagePayload(msg);
 	BT_ACCESSOR_MESSAGE *event;
@@ -600,22 +740,11 @@ void bt_panu_handle_bta_msg(struct bt_panu *panu, GBS_MSG *msg) {
 			}
 			break;
 		case BT_EVENT_CONNECTION_OPEN_IND:
-			bt_panu_connection_opened(panu, event);
+			bt_panu_connection_opened(panu, event->object_handle, event->result,
+									  event->parameter.connection_open.connection_type);
 			break;
 		case BT_EVENT_CONNECTION_OPEN_FAILED_IND:
-			sprintf(panu->log_buf,
-					"L2CAP open failed: result=%04X layer=%02X sdev open=%u reg=%u close=%u "
-					"app=%X type=%X info=%02X %02X %02X %02X %02X %02X\r\n",
-					event->result, event->result_detail, sdev_opens, sdev_regs, sdev_closes,
-					sdev_last_app, sdev_last_type, sdev_last_info[0], sdev_last_info[1], sdev_last_info[2],
-					sdev_last_info[3], sdev_last_info[4], sdev_last_info[5]);
-			usart_puts(panu->log_buf);
-			panu->conn = BT_INVALID_HANDLE;
-			panu->remote_device = NULL;
-			if (panu->state != BT_PANU_STATE_STOPPING)
-				panu->state = BT_PANU_STATE_IDLE;
-			if (panu->config.cb && panu->config.cb->disconnected)
-				panu->config.cb->disconnected(panu, panu->config.user_data);
+			bt_panu_open_failed(panu, event->result, event->result_detail);
 			break;
 		case BT_EVENT_CONNECTION_L2CAP_PARAMETERS_CFM:
 			sprintf(panu->log_buf, "L2CAP negotiated: txMTU=%u rxMTU=%u\r\n",
@@ -625,22 +754,13 @@ void bt_panu_handle_bta_msg(struct bt_panu *panu, GBS_MSG *msg) {
 			break;
 		case BT_EVENT_CONNECTION_CLOSED_IND:
 		case BT_EVENT_CONNECTION_CLOSED_CFM:
-			bt_panu_stop_timer(&panu->rx_timer);
-			bt_panu_stop_timer(&panu->setup_timer);
-			bt_panu_stop_timer(&panu->close_timer);
-			panu->conn = BT_INVALID_HANDLE;
-			bt_panu_disconnect_acl(panu);
-			if (panu->state != BT_PANU_STATE_STOPPING)
-				panu->state = BT_PANU_STATE_IDLE;
-			usart_puts(event_id == BT_EVENT_CONNECTION_CLOSED_IND ?
-						   "L2CAP/BNEP closed by the PC\r\n" : "L2CAP/BNEP closed\r\n");
-			if (panu->config.cb && panu->config.cb->disconnected)
-				panu->config.cb->disconnected(panu, panu->config.user_data);
+			bt_panu_closed(panu, event_id == BT_EVENT_CONNECTION_CLOSED_IND);
 			break;
 		default:
 			break;
 	}
 }
+#endif
 
 void bt_panu_stop(struct bt_panu *panu) {
 	if (panu->state == BT_PANU_STATE_STOPPING)
@@ -676,10 +796,28 @@ int bt_panu_deinit(struct bt_panu *panu) {
 	bt_panu_stop_timer(&panu->close_timer);
 	bt_panu_stop_timer(&panu->acl_timer);
 	bt_panu_restore_app(panu);
+#ifdef SGOLD
+	/* MR_Stop, then the MR's own event releases it (bt_panu_handle_bta_msg); called again until
+	 * then. ~5 s without the event: leave the MR, its messages die with our process. */
+	if (panu->accessor != BT_INVALID_HANDLE) {
+		if (!panu->mr_stopping) {
+			panu->mr_stopping = true;
+			panu->mr_polls = 0;
+			CA_MR_Stop(panu->accessor);
+			return 1;
+		}
+		if (++panu->mr_polls < 5)
+			return 1;
+		usart_puts("MR: no stop event\r\n");
+		panu->accessor = BT_INVALID_HANDLE;
+		panu->mr_stopping = false;
+	}
+#else
 	if (panu->accessor != BT_INVALID_HANDLE && panu->accessor != 0xffffu) {
 		BTA_Accessor_Delete(panu->accessor);
 		panu->accessor = BT_INVALID_HANDLE;
 	}
+#endif
 	panu->state = BT_PANU_STATE_IDLE;
 	return 0;
 }

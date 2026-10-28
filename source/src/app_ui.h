@@ -2,7 +2,9 @@
 /*
  * BT PAN screen, two tabs (left/right or 1/2):
  *   Связь - connect/disconnect, PC (device picker from the paired list), IP, traffic;
- *   Тест  - speed test directly over BT (UDP) and through the phone's stack (TCP).
+ *   Тест  - speed test directly over BT (UDP) and through the phone's stack (TCP);
+ *   Ping  - ICMP echo to the PC once a second (src/ping.c), RTT, losses, a bar graph.
+ * Link and Ping scroll, so they fit 132x176 (S65) as well as 240x320.
  * PAN itself runs in the separate 0x1A00 GBS process; this screen drives AppStartPan()/
  * AppStopPan() (main.c) and posts requests to that process. Included at the end of main.c.
  */
@@ -25,12 +27,16 @@ static int gui_focused;
 static int ui_redraw;
 static unsigned ui_polls;
 static unsigned ui_last_redraw;
-static int ui_tab;          /* 0 Link, 1 Test */
-static int ui_row[2];       /* selected row per tab */
+#define UI_TABS 3
+static int ui_tab;          /* 0 Link, 1 Test, 2 Ping */
+static int ui_row[UI_TABS]; /* selected row per tab */
+static int ping_size_i;     /* index into ping_sizes */
+static const unsigned ping_sizes[] = {56, 512, 1472};
 static int ui_picker;       /* device list open */
 static int picker_row, picker_top;
 
 static void AppExit(void);
+static void AppMinimize(void);
 
 #define RGB(r,g,b) {r,g,b,100}
 static const char C_BG[4] = RGB(15,21,31), C_PANEL[4] = RGB(27,37,51);
@@ -90,6 +96,7 @@ static void UiStatus(char *buf, int n, const char **color) {
 	}
 	if (!pan_running && !addr_ok) { snprintf(buf, n, "Choose a PC"); *color = C_WAIT; return; }
 	if (!pan_running) { snprintf(buf, n, "Disconnected"); *color = C_DIM; return; }
+	if (reconnect_wait) { snprintf(buf, n, "Reconnecting..."); *color = C_WAIT; return; }
 	switch (panu.state) {
 		case BT_PANU_STATE_STARTING:
 			snprintf(buf, n, "Starting BT..."); *color = C_WAIT; return;
@@ -115,7 +122,7 @@ static int Busy(void) { return pan_running && panu.state == BT_PANU_STATE_STOPPI
 /* A number that changes whenever anything shown on screen changes. */
 static unsigned UiSig(void) {
 	unsigned s = (unsigned)pan_running, i;
-	s = s * 31u + (unsigned)panu.state;
+	s = s * 31u + (unsigned)panu.state * 2u + (unsigned)reconnect_wait;
 	s = s * 31u + (unsigned)netif.registered;
 	s = s * 31u + (unsigned)netif.dhcp_state;
 	s = s * 31u + (unsigned)addr_ok * 2u + (unsigned)auto_reconnect;
@@ -128,6 +135,9 @@ static unsigned UiSig(void) {
 		s = s * 31u + speedtest[i].progress;
 		s = s * 31u + speedtest[i].live_bps / 100u;
 	}
+	s = s * 31u + (unsigned)ping_stats.running * 2u + ping_stats.sent;
+	s = s * 31u + ping_stats.hist_n + (unsigned)ping_size_i;
+	s = s * 31u + (unsigned)(uintptr_t)ping_stats.error;
 	return s;
 }
 
@@ -139,13 +149,13 @@ static void Softkeys(const char *left, const char *right) {
 }
 
 static void DrawHeader(void) {
-	static const char *tabs[] = {"Link", "Test"};
-	int w = ScreenW(), fm = GetFontYSIZE(FONT_MEDIUM_BOLD), fs = FontS(), y, tw = w / 2, i;
+	static const char *tabs[] = {"Link", "Test", "Ping"};
+	int w = ScreenW(), fm = GetFontYSIZE(FONT_MEDIUM_BOLD), fs = FontS(), y, tw = w / UI_TABS, i;
 	UiText("BT PAN", 7, YDISP + 2, w - 53, YDISP + fm + 1, FONT_MEDIUM_BOLD, TEXT_ALIGNLEFT, C_TEXT);
 	UiText(BT_PAN_BUILD_TAG, w - 60, YDISP + 4, w - 7, YDISP + fs + 3, FONT_SMALL, TEXT_ALIGNRIGHT,
 		   C_DIM);
 	y = YDISP + fm + 6;
-	for (i = 0; i < 2; ++i) {
+	for (i = 0; i < UI_TABS; ++i) {
 		const char *c = ui_tab == i ? C_BLUE : C_DIM, *line = ui_tab == i ? C_BLUE : C_LINE;
 		UiText(tabs[i], i * tw + 3, y, (i + 1) * tw - 4, y + fs - 1, FONT_SMALL_BOLD,
 			   TEXT_ALIGNMIDDLE, c);
@@ -175,17 +185,18 @@ static void Row1(const char *label, const char *value, int utf8, int y, int sele
 }
 
 
-/* Tab "Link" scrolls: items are laid out in virtual coordinates (0 = content top), and
- * only items that fit completely in the content area are drawn, so nothing runs over the
- * header or the softkeys. Rows 0..2 are selectable; row 3 scrolls to the end. */
+/* Tabs "Link" and "Ping" scroll: items are laid out in virtual coordinates (0 = content top),
+ * and only items that fit completely in the content area are drawn, so nothing runs over the
+ * header or the softkeys. The last row of a tab is "details": it scrolls to the end. */
 #define LINK_ROWS 4
-static int link_scroll;
+#define PING_ROWS 3
+static int tab_scroll[UI_TABS];
 static int lk_draw, lk_top, lk_bottom, lk_sel_y, lk_sel_h;
 
 /* place an item of height h at virtual y; 1 = draw it now at *sy */
 static int Place(int y, int h, int row, int *sy) {
-	if (row >= 0 && row == ui_row[0]) { lk_sel_y = y; lk_sel_h = h; }
-	*sy = lk_top + y - link_scroll;
+	if (row >= 0 && row == ui_row[ui_tab]) { lk_sel_y = y; lk_sel_h = h; }
+	*sy = lk_top + y - tab_scroll[ui_tab];
 	return lk_draw && *sy + h > lk_top - 3 && *sy < lk_bottom + 3;
 }
 
@@ -260,86 +271,212 @@ static int LinkItems(void) {
 	return y;
 }
 
-static void DrawLink(void) {
-	int total, view, max;
+/* end = 1: show the end whatever is selected (a running ping: the numbers, Stop on the softkey) */
+static void DrawScrolled(int (*items)(void), int rows, int end) {
+	int total, view, max, *scroll = &tab_scroll[ui_tab], row = ui_row[ui_tab];
 
 	lk_top = ContentTop() + 3;
 	lk_bottom = ContentBottom();
 	view = lk_bottom - lk_top;
 	lk_draw = 0;
 	lk_sel_y = 0; lk_sel_h = 0;
-	total = LinkItems();
+	total = items();
 	max = total > view ? total - view : 0;
-	if (ui_row[0] == LINK_ROWS - 1) link_scroll = max;  /* the details at the end */
+	if (end || row == rows - 1) *scroll = max;  /* the details at the end */
 	else {
-		if (lk_sel_y < link_scroll) link_scroll = lk_sel_y;
-		if (lk_sel_y + lk_sel_h > link_scroll + view) link_scroll = lk_sel_y + lk_sel_h - view;
-		if (ui_row[0] == 0) link_scroll = 0; /* status and IP above the button */
+		if (lk_sel_y < *scroll) *scroll = lk_sel_y;
+		if (lk_sel_y + lk_sel_h > *scroll + view) *scroll = lk_sel_y + lk_sel_h - view;
+		if (row == 0) *scroll = 0; /* what is above the first button */
 	}
-	if (link_scroll > max) link_scroll = max;
-	if (link_scroll < 0) link_scroll = 0;
+	if (*scroll > max) *scroll = max;
+	if (*scroll < 0) *scroll = 0;
 	lk_draw = 1;
-	LinkItems();
+	items();
 	if (max) { /* scroll bar */
-		int bh = view * view / total, by = lk_top + (view - bh) * link_scroll / max;
+		int bh = view * view / total, by = lk_top + (view - bh) * *scroll / max;
 		DrawRectangle(ScreenW() - 3, lk_top, ScreenW() - 2, lk_bottom, 0, C_PANEL, C_PANEL);
 		DrawRectangle(ScreenW() - 3, by, ScreenW() - 2, by + bh, 0, C_DIM, C_DIM);
 	}
+}
+
+static void DrawLink(void) {
+	DrawScrolled(LinkItems, LINK_ROWS, 0);
 	Softkeys(ui_row[0] == 1 ? "Select" : ui_row[0] == 2 ? "Change" : ui_row[0] == 3 ? ""
 			 : pan_running ? "Disconnect" : "Connect", "Exit");
 }
 
-static void DrawResult(int which, int *py, int bottom) {
+/* label left, value right, not selectable */
+static void Pair(const char *label, const char *value, int sy, const char *color) {
+	int w = ScreenW(), fs = FontS(), lw;
+	wsprintf(ws, "%t", label);
+	lw = Get_WS_width(ws, FONT_SMALL);
+	DrawString(ws, 10, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM, C_NONE);
+	wsprintf(ws, "%t", value);
+	UiFit(10 + lw + 6, sy, w - 10, sy + fs - 1, FONT_SMALL_BOLD, TEXT_ALIGNRIGHT, color);
+}
+
+/* one test's results below its button, laid out like the Link tab (Place) */
+static int TestResult(int which, int y) {
 	struct speedtest_state *t = &speedtest[which];
-	int w = ScreenW(), fs = FontS(), y = *py;
+	int w = ScreenW(), fs = FontS(), sy;
 	char buf[48], r[24];
 	if (t->state == SPT_IDLE) {
-		if (y + fs <= bottom) UiText("Not run yet", 12, y, w - 10, y + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM);
-		*py = y + fs + 2;
-		return;
+		if (Place(y, fs, -1, &sy)) UiText("Not run yet", 12, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM);
+		return y + fs + 2;
 	}
 	if (t->state == SPT_ERR) {
-		if (y + fs <= bottom) UiText(t->error ? t->error : "Error", 12, y, w - 10, y + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_ERR);
+		if (Place(y, fs, -1, &sy)) UiText(t->error ? t->error : "Error", 12, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_ERR);
 		y += fs + 2;
 	}
-	if (t->state == SPT_RUN && y + fs + 2 <= bottom) {
-		int x0 = 12, x1 = w - 10, fill = x0 + (x1 - x0) * (int)t->progress / 100;
-		DrawRoundedFrame(x0, y, x1, y + fs + 2, 3, 3, 0, C_PANEL, C_PANEL);
-		if (fill > x0 + 1) DrawRoundedFrame(x0, y, fill, y + fs + 2, 3, 3, 0, C_OK, C_OK);
-		snprintf(buf, sizeof(buf), "%s %u%%", t->dir == SPT_DL ? "download" : "upload", t->progress);
-		UiText(buf, x0, y + 1, x1, y + fs, FONT_SMALL_BOLD, TEXT_ALIGNMIDDLE, C_TEXT);
+	if (t->state == SPT_RUN) {
+		if (Place(y, fs + 3, -1, &sy)) {
+			int x0 = 12, x1 = w - 10, fill = x0 + (x1 - x0) * (int)t->progress / 100;
+			DrawRoundedFrame(x0, sy, x1, sy + fs + 2, 3, 3, 0, C_PANEL, C_PANEL);
+			if (fill > x0 + 1) DrawRoundedFrame(x0, sy, fill, sy + fs + 2, 3, 3, 0, C_OK, C_OK);
+			snprintf(buf, sizeof(buf), "%s %u%%", t->dir == SPT_DL ? "download" : "upload", t->progress);
+			UiText(buf, x0, sy + 1, x1, sy + fs, FONT_SMALL_BOLD, TEXT_ALIGNMIDDLE, C_TEXT);
+		}
 		y += fs + 6;
 	}
-	if (y + fs <= bottom) {
+	{
 		unsigned dl = t->state == SPT_RUN && t->dir == SPT_DL ? t->live_bps : t->dl_bps;
 		if (dl || t->state != SPT_ERR) FmtRate(r, sizeof(r), dl); else snprintf(r, sizeof(r), "-");
-		snprintf(buf, sizeof(buf), "Download: %s", r);
-		UiText(buf, 12, y, w - 10, y + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_TEXT);
+		if (Place(y, fs, -1, &sy)) Pair("Download", r, sy, C_TEXT);
 		y += fs + 2;
 	}
-	if (y + fs <= bottom) {
-		if (t->state == SPT_RUN && t->dir == SPT_DL) snprintf(r, sizeof(r), "...");
-		else FmtRate(r, sizeof(r), t->state == SPT_RUN ? t->live_bps : t->ul_bps);
-		snprintf(buf, sizeof(buf), "Upload:   %s", r);
-		UiText(buf, 12, y, w - 10, y + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_TEXT);
+	if (t->state == SPT_RUN && t->dir == SPT_DL) snprintf(r, sizeof(r), "...");
+	else FmtRate(r, sizeof(r), t->state == SPT_RUN ? t->live_bps : t->ul_bps);
+	if (Place(y, fs, -1, &sy)) Pair("Upload", r, sy, C_TEXT);
+	return y + fs + 2;
+}
+
+static int TestItems(void) {
+	static const char *titles[] = {"Direct (BT, UDP)", "Via stack (TCP)"};
+	int fs = FontS(), y = 0, sy, i, running = speedtest_running();
+	for (i = 0; i < 2; ++i) {
+		const char *label = speedtest[i].state == SPT_RUN ? "Stop" : titles[i];
+		if (Place(y, fs + 10, i, &sy))
+			Button(label, sy, ui_row[1] == i, Online() && (!running || speedtest[i].state == SPT_RUN));
+		y += fs + 14;
+		y = TestResult(i, y) + 6;
+	}
+	if (!Online()) {
+		if (Place(y, fs, -1, &sy)) UiText("Connect first", 9, sy, ScreenW() - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM);
 		y += fs + 2;
 	}
-	*py = y;
+	return y;
 }
 
 static void DrawTest(void) {
-	static const char *titles[] = {"Direct (BT, UDP)", "Via stack (TCP)"};
-	int fs = FontS(), y = ContentTop() + 3, bottom = ContentBottom(), i, running = speedtest_running();
-	for (i = 0; i < 2; ++i) {
-		const char *label = speedtest[i].state == SPT_RUN ? "Stop" : titles[i];
-		Button(label, y, ui_row[1] == i, Online() && (!running || speedtest[i].state == SPT_RUN));
-		y += fs + 14;
-		DrawResult(i, &y, bottom);
-		y += 6;
-	}
-	if (!Online() && y + fs <= bottom)
-		UiText("Connect first", 9, y, ScreenW() - 10, y + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM);
+	DrawScrolled(TestItems, 2, 0); /* the second test: scrolled to the end, its results visible */
 	Softkeys(speedtest[ui_row[1]].state == SPT_RUN ? "Stop" : "Start", "Exit");
+}
+
+static unsigned PingSize(void) {
+	unsigned size = ping_sizes[ping_size_i], max = ping_max_size();
+	return size < max ? size : max;
+}
+
+static void FmtRtt(char *buf, int size, unsigned us) {
+	if (us == PING_LOST) snprintf(buf, size, "timeout");
+	else if (us < 10000) snprintf(buf, size, "%u.%u ms", us / 1000, us % 1000 / 100);
+	else snprintf(buf, size, "%u ms", (us + 500) / 1000);
+}
+
+static int PingItems(void) {
+	struct ping_stats *p = &ping_stats;
+	int w = ScreenW(), fs = FontS(), fm = GetFontYSIZE(FONT_MEDIUM_BOLD), y = 0, sy, gh;
+	char buf[40], v[24];
+	unsigned n, i, lost = p->sent - p->received;
+
+	if (Place(y, fs + 10, 0, &sy))
+		Button(p->running ? "Stop" : "Ping the PC", sy, ui_row[2] == 0, p->running || Online());
+	y += fs + 17;
+	snprintf(v, sizeof(v), "%u B", PingSize());
+	if (Place(y, fs + 8, 1, &sy)) Row1("Size", v, 0, sy, ui_row[2] == 1, !p->running);
+	y += fs + 12;
+	if (Online() || p->sent) {
+		FmtIp(buf, sizeof(buf), "To ", pan_server_ip());
+		if (Place(y, fs, -1, &sy)) UiText(buf, 9, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM);
+		y += fs + 3;
+	}
+	if (p->error) {
+		if (Place(y, fs, -1, &sy)) UiText(p->error, 9, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_ERR);
+		y += fs + 3;
+	} else if (!Online() && !p->sent) {
+		if (Place(y, fs, -1, &sy)) UiText("Connect first", 9, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM);
+		y += fs + 3;
+	}
+	if (!p->sent) return y;
+
+	/* last round trip, big */
+	FmtRtt(v, sizeof(v), p->last_us);
+	if (Place(y, fm + 1, 2, &sy))
+		UiText(p->hist_n ? v : "...", 9, sy, w - 10, sy + fm, FONT_MEDIUM_BOLD, TEXT_ALIGNLEFT,
+			   !p->hist_n ? C_DIM : p->last_us == PING_LOST ? C_ERR : C_OK);
+	y += fm + 4;
+	snprintf(v, sizeof(v), "%u / %u", p->received, p->sent);
+	if (Place(y, fs, -1, &sy)) Pair("Replies", v, sy, C_TEXT);
+	y += fs + 2;
+	snprintf(v, sizeof(v), "%u (%u%%)", lost, p->sent ? lost * 100u / p->sent : 0);
+	if (Place(y, fs, -1, &sy)) Pair("Lost", v, sy, lost ? C_ERR : C_TEXT);
+	y += fs + 2;
+	if (p->received) {
+		FmtRtt(v, sizeof(v), p->sum_us / p->received);
+		if (Place(y, fs, -1, &sy)) Pair("Average", v, sy, C_TEXT);
+		y += fs + 2;
+		FmtRtt(buf, sizeof(buf), p->min_us);
+		FmtRtt(v, sizeof(v), p->max_us);
+		snprintf(buf + strlen(buf) - 3, sizeof(buf) - strlen(buf) + 3, "-%s", v); /* "12-40 ms" */
+		if (Place(y, fs, -1, &sy)) Pair("Min-max", buf, sy, C_TEXT);
+		y += fs + 2;
+	}
+
+	/* the last round trips as bars, newest right; lost = red full height */
+	gh = fs * 2 + 4;
+	n = p->hist_n < PING_HIST ? p->hist_n : PING_HIST;
+	if (n && Place(y + 3, gh, -1, &sy)) {
+		int x0 = 9, x1 = w - 10, bw = (x1 - x0 + 1) / (int)PING_HIST, top = 1;
+		unsigned scale = 1;
+		if (bw < 2) bw = 2;
+		for (i = 0; i < n; ++i) {
+			unsigned us = p->hist[(p->hist_n - 1 - i) % PING_HIST];
+			if (us != PING_LOST && us > scale) scale = us;
+		}
+		DrawRectangle(x0, sy, x1, sy + gh - 1, 0, C_PANEL, C_PANEL);
+		for (i = 0; i < n && x1 - (int)(i + 1) * bw + 1 >= x0; ++i) {
+			unsigned us = p->hist[(p->hist_n - 1 - i) % PING_HIST];
+			int bx1 = x1 - (int)i * bw, bx0 = bx1 - bw + 2, h;
+			if (us == PING_LOST) h = gh - 2;
+			else h = top + (int)((uint64_t)us * (unsigned)(gh - 2 - top) / scale);
+			DrawRectangle(bx0, sy + gh - 1 - h, bx1, sy + gh - 2, 0,
+						  us == PING_LOST ? C_ERR : C_BLUE, us == PING_LOST ? C_ERR : C_BLUE);
+		}
+	}
+	y += gh + 5;
+	return y;
+}
+
+static void DrawPing(void) {
+	DrawScrolled(PingItems, PING_ROWS, ping_stats.running && ui_row[2] == 0);
+	Softkeys(ui_row[2] == 1 ? (ping_stats.running ? "" : "Change") : ui_row[2] == 2 ? ""
+			 : ping_stats.running ? "Stop" : "Start", "Exit");
+}
+
+static void PingAction(void) {
+	if (ui_row[2] == 1) {
+		if (!ping_stats.running) ping_size_i = (ping_size_i + 1) % (int)(sizeof(ping_sizes) / sizeof(ping_sizes[0]));
+		return;
+	}
+	if (ui_row[2] != 0) return;
+	if (ping_stats.running) {
+		GBS_SendMessage(BT_PANU_PROCESS_CEPID, BT_PANU_MESSAGE_PING_STOP, 0, 0, 0);
+		ping_stats.running = 0; /* shown at once */
+	} else if (Online()) {
+		ping_stats.running = 1; /* shown at once; the BTPAN process starts it */
+		ping_stats.error = NULL;
+		GBS_SendMessage(BT_PANU_PROCESS_CEPID, BT_PANU_MESSAGE_PING_START, 0, (void *)PingSize(), 0);
+	}
 }
 
 static void DrawPicker(void) {
@@ -365,11 +502,14 @@ static void DrawPicker(void) {
 }
 
 static void gui_onredraw(GUI *data) {
+	static int traced;
 	(void)data;
+	if (traced < 2) trace(traced++ ? "R second redraw" : "R first redraw");
 	DrawRectangle(0, YDISP, ScreenW() - 1, ScreenH() - 1, 0, C_BG, C_BG);
 	if (ui_picker) DrawPicker();
 	else if (ui_tab == 0) DrawLink();
-	else DrawTest();
+	else if (ui_tab == 1) DrawTest();
+	else DrawPing();
 	/* header last: covers a scrolled item cut at the top */
 	DrawRectangle(0, YDISP, ScreenW() - 1, ContentTop() + 2, 0, C_BG, C_BG);
 	DrawHeader();
@@ -377,6 +517,7 @@ static void gui_onredraw(GUI *data) {
 
 static void gui_oncreate(GUI *data, malloc_func_t alloc) {
 	(void)alloc;
+	trace("G gui oncreate");
 	data->state = CSM_GUI_STATE_UNFOCUSED;
 	((MAIN_GUI *)data)->ws = ws = AllocWS(256);
 	gui_focused = 1;  /* assume focus until onunfocus says otherwise */
@@ -469,15 +610,17 @@ static int gui_onkey(GUI *data, GUI_MSG *msg) {
 		return 0;
 	}
 	if (type != KEY_DOWN) return 0;
-	if (key == RED_BUTTON || key == RIGHT_SOFT) AppExit();
-	else if (key == LEFT_BUTTON || key == RIGHT_BUTTON) ui_tab ^= 1;
-	else if (key == '1' || key == '2') ui_tab = key - '1';
+	if (key == RED_BUTTON) AppMinimize();   /* "Exit" (right soft) leaves */
+	else if (key == RIGHT_SOFT) AppExit();
+	else if (key == LEFT_BUTTON || key == RIGHT_BUTTON)
+		ui_tab = (ui_tab + (key == RIGHT_BUTTON ? 1 : UI_TABS - 1)) % UI_TABS;
+	else if (key >= '1' && key < '1' + UI_TABS) ui_tab = key - '1';
 	else if (key == UP_BUTTON || key == DOWN_BUTTON) {
-		int rows = ui_tab == 0 ? LINK_ROWS : 2;
+		int rows = ui_tab == 0 ? LINK_ROWS : ui_tab == 1 ? 2 : PING_ROWS;
 		ui_row[ui_tab] = (ui_row[ui_tab] + (key == DOWN_BUTTON ? 1 : rows - 1)) % rows;
 	}
 	else if (key == LEFT_SOFT || key == ENTER_BUTTON || key == GREEN_BUTTON) {
-		if (ui_tab == 0) LinkAction(); else TestToggle(ui_row[1]);
+		if (ui_tab == 0) LinkAction(); else if (ui_tab == 1) TestToggle(ui_row[1]); else PingAction();
 	}
 	ui_redraw = 1;
 	return 0;
@@ -520,6 +663,21 @@ static void UiPoll(GBSTMR *timer) {
 	unsigned sig;
 	(void)timer;
 	++ui_polls;
+#if BT_PAN_TRACE
+	{ /* each ~1 s from MMI: where our code was last (see trace.h) */
+		static unsigned lines, last_seq = ~0u, same;
+		char t[96];
+
+		if (ui_polls % (216u / UI_POLL_TICKS ? 216u / UI_POLL_TICKS : 1u) == 0 && lines < 500 &&
+			(trace_where_seq != last_seq || ++same % 5 == 0)) {
+			++lines;
+			sprintf(t, "W %u seq=%u %s %X in %X", ui_polls, trace_where_seq, trace_where,
+					trace_where_arg, trace_where_cepid);
+			trace(t);
+			last_seq = trace_where_seq;
+		}
+	}
+#endif
 	if (ui_exit_requested) { ui_exit_requested = false; UiClose(); return; }
 	if (!pan_running && speedtest[SPEEDTEST_STACK].state == SPT_RUN) speedtest_stack_cancel();
 	sig = UiSig();
@@ -532,11 +690,13 @@ static void UiPoll(GBSTMR *timer) {
 
 static void maincsm_oncreate(CSM_RAM *data) {
 	MAIN_CSM *csm = (MAIN_CSM *)data;
+	trace("C csm oncreate");
 	main_csm = csm;
 	csm->csm.state = CSM_STATE_OPEN;
 	csm->gui_id = 0;
 	UiShow();
 	GBS_StartTimerProc(&ui_timer, UI_POLL_TICKS, UiPoll);
+	trace("C csm open");
 }
 
 static void maincsm_onclose(CSM_RAM *data) {
@@ -561,8 +721,98 @@ static void maincsm_onclose(CSM_RAM *data) {
 	kill_elf();
 }
 
+/* Move a CSM: an MMI command (as XTask's CSMtoTop, sieelf/MySMSYS CSMswaper.c), but simpler:
+ * the CSM is taken out of the list and put back right below CSM parent_id, or last (= on top)
+ * for -1; the others stay where they are. XTask instead moves the CSMs above ours down to "under
+ * idle" as it was at XTask's start; taken at call time that is often our minimized CSM itself
+ * (D42: nothing happened). Then the top CSM's GUI gets the focus. */
+#ifdef NEWSGOLD
+#define MMICMD_ID(cmd) ((cmd)->id)
+#else
+#define MMICMD_ID(cmd) ((int)(cmd)->cmd_csm)
+#endif
+
+static int do_csm_move(CSMQ *csm_q, void *_cmd) {
+	MMICMD *cmd = _cmd;
+	CSM_RAM *work = FindCSM(csm_q, MMICMD_ID(cmd));
+	CSM_RAM *before = cmd->parent_id == -1 ? NULL : FindCSM(csm_q, cmd->parent_id);
+	int *gui;
+	if (!work || work == before || (cmd->parent_id != -1 && !before))
+		return 1;
+	if (before ? work->next == before : work == (CSM_RAM *)csm_q->csm.last)
+		return 1; /* already there */
+	UnfocusGUI();
+	/* out of the list */
+	if (work->prev)
+		((CSM_RAM *)work->prev)->next = work->next;
+	else
+		csm_q->csm.first = work->next;
+	if (work->next)
+		((CSM_RAM *)work->next)->prev = work->prev;
+	else
+		csm_q->csm.last = work->prev;
+	/* back in: below "before", or last */
+	if (before) {
+		work->next = before;
+		work->prev = before->prev;
+		if (before->prev)
+			((CSM_RAM *)before->prev)->next = work;
+		else
+			csm_q->csm.first = work;
+		before->prev = work;
+	} else {
+		work->prev = csm_q->csm.last;
+		work->next = NULL;
+		((CSM_RAM *)csm_q->csm.last)->next = work;
+		csm_q->csm.last = work;
+	}
+	if ((gui = ((CSM_RAM *)csm_q->csm.last)->gui_ll.last))
+		FocusGUI(gui[3]);
+	GBS_SendMessage(MMI_CEPID, MSG_CSM_DESTROYED, 0, 30002, 0); /* as XTask: the screens redraw */
+	return 1;
+}
+
+static void csm_move(int id, int below_id) {
+	CSMQ *csm_q = CSM_root()->csm_q;
+	MMICMD *cmd;
+	if (!FindCSMbyID(id) || !(cmd = malloc(sizeof(MMICMD))))
+		return;
+	zeromem(cmd, sizeof(MMICMD));
+	cmd->csm_q = csm_q;
+	cmd->flag1 = 5;
+#ifdef NEWSGOLD
+	cmd->prio = 0;
+	cmd->id = id;
+#else
+	cmd->cmd_csm = (CSM_RAM *)id; /* SGOLD has no id field (as XTask) */
+#endif
+	cmd->parent_id = below_id;
+	cmd->proc = do_csm_move;
+	/* to the end of the MMI's command list; the MMI runs it and frees it */
+	cmd->next = NULL;
+	cmd->prev = csm_q->cmd.last;
+	if (csm_q->cmd.last)
+		((MMICMD *)csm_q->cmd.last)->next = cmd;
+	else
+		csm_q->cmd.first = cmd;
+	csm_q->cmd.last = cmd;
+}
+
+/* started again: our screen on top */
+static void csm_to_top(int id) { csm_move(id, -1); }
+
+/* red button: our screen right below the idle screen (as XTask hides), PAN keeps running */
+static void AppMinimize(void) {
+	if (main_csm) csm_move(main_csm->csm.id, CSM_root()->idle_id);
+}
+
 static int maincsm_onmessage(CSM_RAM *data, GBS_MSG *msg) {
 	MAIN_CSM *csm = (MAIN_CSM *)data;
+	if (GBS_MSG_ID(msg->msg) == GBS_MSG_ID(BT_PAN_MSG_SHOW) && msg->submess == BT_PAN_MSG_MAGIC) { /* started again */
+		usart_puts("BT PAN: started again, screen to the top\r\n");
+		csm_to_top(csm->csm.id);
+		return 1;
+	}
 	if (msg->msg == MSG_GUI_DESTROYED && (int)msg->data0 == csm->gui_id) {
 		csm->gui_id = 0;
 		csm->csm.state = CSM_STATE_CLOSED;

@@ -1,4 +1,4 @@
-# BT PAN для BenQ-Siemens EL71 sw45 и E71 sw45
+# BT PAN для BenQ-Siemens EL71 sw45, E71 sw45 и Siemens S65 sw58
 
 [English version](README.en.md)
 
@@ -9,10 +9,11 @@
 
 | Файл | Что это |
 |---|---|
-| `bt-pan_ELKA.elf` | эльф |
+| `bt-pan_ELKA.elf` | эльф для EL71 и E71 |
+| `bt-pan_SG.elf` | эльф для S65 sw58 |
 | `nap.sh` | для ПК |
 | `speedtest-pc.py` | сервер спидтеста (`nap.sh` запускает сам, лежать рядом) |
-| `patches/` | патчи для EL71, `patches/e71/` — для E71 |
+| `patches/` | патчи для EL71, `patches/e71/` — для E71, `patches/s65/` — для S65 |
 | `source/` | исходники |
 | `phone-manual/` | инструкции со скриншотами: GPRS-профиль, подключение эльфа |
 
@@ -24,6 +25,14 @@
 2. `bt-pan-mtu...vkp` — обязательно.
 3. `btnet_...vkp` — нужен браузеру и эльфам. Без запущенного эльфа ничего не меняет.
    Если эльф пишет «Old hook patch» — откатите `patches/old/...` и поставьте новый.
+
+### S65 sw58 (`patches/s65/`)
+
+1. `library-s65-sw58-extended.vkp` — расширенная библиотека функций с функциями Bluetooth.
+2. `bt-pan-mtu_S65v58.vkp` — желательно: без него пакеты не больше 320 байт и на ПК нужен
+   `sudo MTU=320 ./nap.sh`.
+3. `bt-pan-browser_S65v58.vkp` — нужен только встроенному браузеру без SIM-карты.
+   Без запущенного эльфа ничего не меняет.
 
 ## ПК
 

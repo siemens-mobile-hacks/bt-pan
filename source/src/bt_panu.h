@@ -43,7 +43,7 @@ struct bt_panu_config {
 
 struct bt_panu {
 	struct bt_panu_config config;
-	BT_HANDLE accessor;
+	BT_HANDLE accessor;      /* SGOLD: the message replicator (bt_sg.h) */
 	BT_HANDLE conn;
 	BT_REMOTE_DEVICE_INFO *remote_device;
 	BT_TRANSACTION_ID transaction_id;
@@ -66,6 +66,8 @@ struct bt_panu {
 	bool acl_disconnect_settling;
 	bool setup_accepted;
 	unsigned int setup_attempts;
+	bool mr_stopping;        /* SGOLD: MR_Stop sent, waiting for its event */
+	unsigned int mr_polls;
 };
 
 void bt_panu_init(struct bt_panu *panu, const struct bt_panu_config *config);

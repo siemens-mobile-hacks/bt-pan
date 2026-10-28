@@ -9,6 +9,8 @@
 #include "config.h"
 #include "dhcp.h"
 #include "pan_lman.h"
+#include "ping.h"
+#include "trace.h"
 #include "speedtest.h"
 #include "usart.h"
 
@@ -16,12 +18,25 @@
 
 #define BT_PAN_NETIF_ACTIVE_FLAGS 0xc0u
 
-/* Values used by the native EL71 link receive path. */
+/* Values used by the native EL71 link receive path (S65: the same caller, A13358B2, uses
+ * pool 6; its packet_allocate has no quota argument, the extra one is ignored). */
+#ifdef SGOLD
+#define BT_PAN_NETIF_RX_POOL 6u
+#else
 #define BT_PAN_NETIF_RX_POOL 5u
+#endif
 #define BT_PAN_NETIF_RX_OFFSET 7
 #define BT_PAN_NETIF_RX_QUOTA 100
 #define BT_PAN_NETIF_RX_EXTRA 9u
 #define BT_PAN_NETIF_RX_HEADROOM 4u
+
+/* largest IP packet one L2CAP SDU carries */
+#ifdef SGOLD
+unsigned bt_pan_tx_max = BT_PAN_SG_IP_MTU; /* main.c raises it with the MTU patch */
+#define BT_PAN_TX_MAX bt_pan_tx_max
+#else
+#define BT_PAN_TX_MAX ETH_DATA_LEN
+#endif
 
 #define IPV4_HEADER_SIZE 20u
 #define IPV4_DESTINATION_OFFSET 16u
@@ -49,12 +64,45 @@ static void bt_pan_netif_down(ENIP_MODULE *module) {
 
 volatile uint32_t bt_pan_rx_bytes, bt_pan_tx_bytes; /* IPv4 bytes, for the UI */
 
+#if BT_PAN_TRACE
+struct trace_pkt trace_pkts[TRACE_PKT_N];
+volatile unsigned trace_pkt_n;
+
+void trace_pkt(char dir, const uint8_t *ip, size_t length) {
+	struct trace_pkt *t;
+	unsigned ihl;
+
+	LockSched();
+	t = &trace_pkts[trace_pkt_n++ % TRACE_PKT_N];
+	UnlockSched();
+	memset(t, 0, sizeof(*t));
+	t->dir = dir;
+	t->len = (uint16_t)length;
+	t->cepid = (uint16_t)GBS_GetCurCepid();
+	if (length < 20)
+		return;
+	ihl = (ip[0] & 0x0fu) * 4u;
+	t->proto = ip[9];
+	memcpy(t->peer, ip + (dir == 'R' ? 12 : 16), 4);
+	if ((ip[9] == 6 || ip[9] == 17) && length >= ihl + 4u) {
+		t->sport = (uint16_t)(ip[ihl] << 8 | ip[ihl + 1]);
+		t->dport = (uint16_t)(ip[ihl + 2] << 8 | ip[ihl + 3]);
+		if (ip[9] == 6 && length >= ihl + 14u)
+			t->flags = ip[ihl + 13];
+	}
+}
+#endif
+
+unsigned bt_pan_netif_tx_max(void) {
+	return BT_PAN_TX_MAX;
+}
+
 /* frame: caller's buffer, BT_PAN_FRAME_SIZE; the IPv4 packet is copied after the header */
 int bt_pan_netif_send_frame(struct bt_pan_netif *netif, uint8_t *frame, const uint8_t *packet,
 							size_t length) {
 	struct bnep_general_hdr *bnep = (struct bnep_general_hdr *)frame;
 
-	if (length > ETH_DATA_LEN || !netif->panu)
+	if (length > BT_PAN_TX_MAX || !netif->panu)
 		return 0;
 	bnep->type = BNEP_GENERAL;
 	memcpy(bnep->ethernet.ether_dhost, netif->panu->config.peer_addr,
@@ -75,12 +123,15 @@ static void bt_pan_netif_send_ipv4(struct bt_pan_netif *netif, const uint8_t *pa
 	struct bnep_general_hdr *bnep = (struct bnep_general_hdr *)netif->tx_buf;
 	size_t bnep_length;
 
-	if (length > ETH_DATA_LEN) {
+	if (length > BT_PAN_TX_MAX) {
 		static unsigned oversize;
+
+		trace_pkt('D', packet, length);
 		static char big_log[48];
 
 		if (++oversize <= 5) {
-			sprintf(big_log, "BT PAN TX: dropped %u-byte packet (> 1500)\r\n", (unsigned)length);
+			sprintf(big_log, "BT PAN TX: dropped %u-byte packet (> %u)\r\n", (unsigned)length,
+					BT_PAN_TX_MAX);
 			usart_puts(big_log);
 		}
 		return;
@@ -113,7 +164,10 @@ static void bt_pan_netif_send_ipv4(struct bt_pan_netif *netif, const uint8_t *pa
 	bnep->ethernet.ether_type = htons(ETHERTYPE_IP);
 	memcpy(bnep + 1, packet, length);
 	bnep_length = sizeof(*bnep) + length;
-	bt_panu_send(netif->panu, netif->tx_buf, bnep_length);
+	if (bt_panu_send(netif->panu, netif->tx_buf, bnep_length))
+		trace_pkt('T', packet, length);
+	else
+		trace_pkt('D', packet, length);
 
 	/* one line per outgoing packet (ENIP process); ~5 ms of USART each, debug only */
 	if (BT_PAN_LOG_PACKETS && length >= 20) {
@@ -132,6 +186,7 @@ static void bt_pan_netif_run(ENIP_MODULE *module) {
 	struct bt_pan_netif *netif = container_of(module, struct bt_pan_netif, module);
 	ENIP_PKT *packet;
 
+	WHERE("netif run", 0);
 	while ((packet = zDLL_RemHead(&module->port.packets_queue))) {
 		bt_pan_netif_send_ipv4(netif, packet->data, packet->size);
 		enip_packet_release(packet);
@@ -143,10 +198,21 @@ static void bt_pan_netif_notify(ENIP_MODULE *module, int event) {
 	(void)event;
 }
 
+/* ENIP's notify (S65 A1333B90) calls this only when the module is neither posted nor running;
+ * enip_module_run (A1333B38) clears those flags and runs run_proc. Run it right here, in the
+ * process that handed us the packet (usually ENIP): queued to ElfLoader's helper (SUBPROC) it
+ * never ran while Java polled ENIP for its DNS answer (D83: helper starved, query never sent).
+ * S65 only; EL71/E71 keep the helper. */
 static void bt_pan_netif_post_run(ENIP_MODULE *module) {
 	struct bt_pan_netif *netif = container_of(module, struct bt_pan_netif, module);
 
-	SUBPROC(enip_module_run, module, &netif->run_result);
+#ifdef SGOLD
+	WHERE("post run", 0);
+	enip_module_run(module, &netif->run_result);
+	WHERE("post run done", 0);
+#else
+	SUBPROC(enip_module_run, module, &netif->run_result); /* EL71/E71: proven on the phone */
+#endif
 }
 
 static void bt_pan_netif_packet_available(ENIP_MODULE *module) {
@@ -400,6 +466,7 @@ static void bt_pan_netif_recv(struct bt_panu *panu, const uint8_t *packet, size_
 	uint16_t protocol;
 
 	(void)panu;
+	WHERE("netif rx", length);
 	if (!bnep_decode_network_packet(packet, length, &protocol, &payload, &payload_length))
 		return;
 
@@ -426,8 +493,13 @@ static void bt_pan_netif_recv(struct bt_panu *panu, const uint8_t *packet, size_
 		bt_pan_rx_bytes += payload_length;
 		if (speedtest_direct_rx(payload, payload_length))
 			return; /* the direct speed test's own UDP, never shown to ENIP */
+		if (ping_rx(payload, payload_length))
+			return; /* our ping's echo replies */
 
+		trace_pkt('R', payload, payload_length);
+		WHERE("enip input", payload_length);
 		result = bt_pan_netif_input(netif, payload, payload_length);
+		WHERE("enip input done", result);
 		if (BT_PAN_LOG_PACKETS || result) {
 			unsigned ihl = (payload[0] & 0x0fu) * 4u, port = 0;
 

@@ -1,4 +1,4 @@
-# BT PAN for BenQ-Siemens EL71 sw45 and E71 sw45
+# BT PAN for BenQ-Siemens EL71 sw45, E71 sw45 and Siemens S65 sw58
 
 [Русская версия](README.md)
 
@@ -9,10 +9,11 @@ tethering» on shares its connection, and the browser, Java and elfs go online a
 
 | File | What it is |
 |---|---|
-| `bt-pan_ELKA.elf` | the elf |
+| `bt-pan_ELKA.elf` | the elf for EL71 and E71 |
+| `bt-pan_SG.elf` | the elf for S65 sw58 |
 | `nap.sh` | PC side |
 | `speedtest-pc.py` | speed test server (`nap.sh` starts it; keep it next to `nap.sh`) |
-| `patches/` | patches for EL71, `patches/e71/` for E71 |
+| `patches/` | patches for EL71, `patches/e71/` for E71, `patches/s65/` for S65 |
 | `source/` | source code |
 | `phone-manual/` | guides with screenshots: GPRS profile, connecting the elf |
 
@@ -24,6 +25,14 @@ tethering» on shares its connection, and the browser, Java and elfs go online a
 2. `bt-pan-mtu...vkp` — required.
 3. `btnet_...vkp` — needed by the browser and elfs. Changes nothing while the elf isn't running.
    If the elf says «Old hook patch», undo `patches/old/...` and install the new one.
+
+### S65 sw58 (`patches/s65/`)
+
+1. `library-s65-sw58-extended.vkp` — extended function library with Bluetooth functions.
+2. `bt-pan-mtu_S65v58.vkp` — recommended: without it packets are at most 320 bytes and the PC
+   needs `sudo MTU=320 ./nap.sh`.
+3. `bt-pan-browser_S65v58.vkp` — only for the built-in browser without a SIM card.
+   Changes nothing while the elf isn't running.
 
 ## PC
 

@@ -56,6 +56,8 @@ extern const struct bt_panu_cb bt_pan_netif_cb;
 void bt_pan_netif_init(struct bt_pan_netif *netif, const struct bt_pan_netif_config *config);
 int bt_pan_netif_start(struct bt_pan_netif *netif);
 void bt_pan_netif_stop(struct bt_pan_netif *netif);
+/* largest IPv4 packet sent (the IP MTU) */
+unsigned bt_pan_netif_tx_max(void);
 /* Send one IPv4 packet in a caller-owned BT_PAN_FRAME_SIZE buffer (any process). 1 = sent. */
 void bt_pan_netif_arp_probe(struct bt_pan_netif *netif, uint32_t target_ip); /* wire order */
 int bt_pan_netif_send_frame(struct bt_pan_netif *netif, uint8_t *frame, const uint8_t *packet,
