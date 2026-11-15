@@ -24,6 +24,7 @@
 #include "pan_lman.h"
 #include "trace.h"
 #include "bt_pan_netif.h"
+#include "prof.h"
 
 #include <swilib.h>
 
@@ -197,16 +198,20 @@ static void msg_done(int traced, const char *tag) {
 static void http_hook0(void) {
 	int t = msg_trace("H4409", http_proc[0]);
 
+	PROF_IN(PROF_H4409);
 	http_pre();
 	http_old[0]();
+	PROF_OUT(PROF_H4409);
 	msg_done(t, "H4409");
 }
 
 static void http_hook1(void) {
 	int t = msg_trace("H4403", http_proc[1]);
 
+	PROF_IN(PROF_H4403);
 	http_pre();
 	http_old[1]();
+	PROF_OUT(PROF_H4403);
 	msg_done(t, "H4403");
 }
 
@@ -256,9 +261,11 @@ static void lman_pre(void) {
 static void lman_hook(void) {
 	int t = msg_trace("L", lman_proc);
 
+	PROF_IN(PROF_LMAN);
 	lman_pre();
 	refs_give();
 	lman_old();
+	PROF_OUT(PROF_LMAN);
 	msg_done(t, "L");
 }
 
@@ -366,10 +373,12 @@ static void gh_after(void) {
 static void enip_hook(void) {
 	int t = msg_trace("E", enip_proc);
 
+	PROF_IN(PROF_ENIP);
 #if BT_PAN_TRACE
 	gh_trace();
 #endif
 	enip_old();
+	PROF_OUT(PROF_ENIP);
 #if BT_PAN_TRACE
 	gh_after();
 #endif

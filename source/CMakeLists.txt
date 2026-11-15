@@ -23,6 +23,7 @@ set(SOURCES
 	src/ping.c
 	src/usart.c
 	src/freestanding.c
+	src/prof.c
 )
 
 # Builds from one source: ELKA (EL71/E71 sw45) and SG (S65 sw58, #ifdef SGOLD; S65 BT in

@@ -10,12 +10,12 @@ Bluetooth → `Known devices`.
 
 ![Known devices](elf-setup/1.jpg)
 
-**2.** Start the elf. On the `Link` tab select the `Computer` row → `choose` and
-pick the paired PC or Android phone from the list.
+**2.** Start the elf. Select the `PC` row (1) and pick the paired PC or Android phone
+from the list.
 
 ![Choosing the device](elf-setup/2.png)
 
-**3.** Press `Connect`. Once connected, a green `Connected` appears along with the IP
-address. The browser, Java and elfs now go online through that device.
+**3.** Select `Connect`. Once connected, the menu shows `Status: Connected` and the IP
+address (2), and the top row turns into `Disconnect`. The browser, Java and elfs now go online through that device.
 
 ![Connected](elf-setup/3.png)

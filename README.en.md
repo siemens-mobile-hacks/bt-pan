@@ -61,12 +61,12 @@ profile, home page starting with `http://`.
 
 1. You need a GPRS internet profile (any settings). Point the browser and Java at it.
    How to create one: [phone-manual/how-to-setup-gprs.en.md](phone-manual/how-to-setup-gprs.en.md).
-2. Start the elf. Tab «Link»: «Computer» → pick the PC → «Connect».
+2. Start the elf. In the menu: «PC» → pick the PC → «Connect».
    Step by step with screenshots: [phone-manual/how-to-setup-elf.en.md](phone-manual/how-to-setup-elf.en.md).
-3. Tab «Test» — speed tests. They work only while the phone is connected to a PC running `nap.sh`.
+3. «Speed test...» — speed tests, «Ping...» — ping. Speed tests work only while the phone is connected to a PC running `nap.sh`.
 4. «Disconnect» drops the link, «Exit» quits.
 
-Settings (the PC and auto-reconnect) can be changed in the elf itself, on the «Link» tab,
+Settings (the PC and auto-reconnect) can be changed in the elf itself (the «PC» and «Auto-reconnect» rows),
 or in the BCFG editor: `zbin\etc\BTPAN.bcfg`.
 
 ## Limitations

@@ -19,6 +19,7 @@
 #include "peers.h"
 #include "speedtest.h"
 #include "usart.h"
+#include "prof.h"
 
 #define GetProcGroup ((PGROUP * (*)(int)) LIB_ENTRY(0x463)) /* GBS_GetProcGroup */
 
@@ -303,7 +304,9 @@ static void process_messages_(void);
 
 static void process_messages(void) {
 	WHERE("P recv", 0);
+	PROF_IN(PROF_BTPAN);
 	process_messages_();
+	PROF_OUT(PROF_BTPAN);
 	WHERE("P idle", 0);
 }
 

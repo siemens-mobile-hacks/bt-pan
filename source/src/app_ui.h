@@ -1,80 +1,56 @@
 #pragma once
 /*
- * BT PAN screen, two tabs (left/right or 1/2):
- *   Связь - connect/disconnect, PC (device picker from the paired list), IP, traffic;
- *   Тест  - speed test directly over BT (UDP) and through the phone's stack (TCP);
- *   Ping  - ICMP echo to the PC once a second (src/ping.c), RTT, losses, a bar graph.
- * Link and Ping scroll, so they fit 132x176 (S65) as well as 240x320.
+ * BT PAN screen = the firmware's own menus (CreateMenu, as ncdu / etabdemo / s65-player), no
+ * self-drawn GUI any more (D130):
+ *
+ *   BT PAN Dxxx      Connect/Disconnect, Status, [hook patch hint], PC, Auto-reconnect,
+ *                    IP, Gateway, DNS, MTU (online only), Received, Sent (+ speed), Speed test...,
+ *                    Ping..., Minimize, Exit
+ *   Speed test       Direct (BT, UDP) start/stop + its results, Via stack (TCP) the same
+ *   Ping             start/stop, size, target, last/replies/lost/average/min-max/history
+ *   Choose PC        the paired devices (name, MAC)
+ *
+ * The firmware draws everything (header, list, cursor, softkeys, scrolling); we only give the
+ * item texts. Live values: a 0.25 s MMI timer compares the shown values with the current ones
+ * (no sprintf) and re-syncs only the menu that is on top: state changes at once, the counters at
+ * most once a second. Never REDRAW() (the old screen did up to 3 per second and per key: the
+ * whole ELKA screen blinked, see STATUS.txt D130).
+ *
  * PAN itself runs in the separate 0x1A00 GBS process; this screen drives AppStartPan()/
  * AppStopPan() (main.c) and posts requests to that process. Included at the end of main.c.
  */
 #include <swilib.h>
 #include <stdint.h>
 #include <stdio.h>
+#include "prof.h"
 
 typedef struct { CSM_RAM csm; int gui_id; } MAIN_CSM;
-typedef struct { GUI base; WSHDR *ws; } MAIN_GUI;
 
-#define UI_POLL_TICKS 22u       /* ~0.1 s */
-#define UI_REDRAW_MIN 3u        /* <= ~3 REDRAW/s: see "no REDRAW per frame" */
+#define UI_POLL_FAST 54u        /* ~0.25 s: our screen on top and a state in transition */
+#define UI_POLL_SLOW 216u       /* 1 s otherwise (connected and idle, minimized, under a message) */
+#define UI_LIVE_TICKS 216u      /* counters/speeds on screen at most once a second */
 #define BT_PAN_SCREEN_NAME "BT PAN"
 
 static MAIN_CSM *main_csm;
-static WSHDR *ws;
-static RECT gui_rect;
 static GBSTMR ui_timer;
-static int gui_focused;
-static int ui_redraw;
 static unsigned ui_polls;
-static unsigned ui_last_redraw;
-#define UI_TABS 3
-static int ui_tab;          /* 0 Link, 1 Test, 2 Ping */
-static int ui_row[UI_TABS]; /* selected row per tab */
-static int ping_size_i;     /* index into ping_sizes */
+static unsigned ui_interval;   /* period the timer is armed with */
+static unsigned ui_ticks;      /* sum of the periods: the poll's clock */
+static unsigned ui_live_at;    /* ui_ticks of the last counter/speed update */
+static bool ui_in_poll;
+static WSHDR *ui_tmp;          /* scratch for item texts (MMI only) */
+static int ui_patch;           /* hooks_patch_state(): flash, does not change while running */
+static int ping_size_i;        /* index into ping_sizes */
 static const unsigned ping_sizes[] = {56, 512, 1472};
-static int ui_picker;       /* device list open */
-static int picker_row, picker_top;
+
+/* traffic speed, once a second from the poll */
+static uint32_t rate_last_rx, rate_last_tx;
+static unsigned rate_rx, rate_tx;
 
 static void AppExit(void);
 static void AppMinimize(void);
 
-#define RGB(r,g,b) {r,g,b,100}
-static const char C_BG[4] = RGB(15,21,31), C_PANEL[4] = RGB(27,37,51);
-static const char C_LINE[4] = RGB(48,62,80), C_TEXT[4] = RGB(235,241,248);
-static const char C_DIM[4] = RGB(153,169,189), C_BLUE[4] = RGB(82,174,255);
-static const char C_OK[4] = RGB(87,219,151), C_WAIT[4] = RGB(255,192,84);
-static const char C_ERR[4] = RGB(255,113,117), C_NONE[4] = {0,0,0,0};
-static unsigned ui_state_sig;
-
-/* text, shortened with "..." when it does not fit */
-static void UiFit(int x1, int y1, int x2, int y2, int font, int align, const char *color) {
-	int available = x2 - x1 + 1;
-	if (Get_WS_width(ws, font) > available) {
-		unsigned n = ws->wsbody[0];
-		if (n > (unsigned)ws->maxlen - 3) n = ws->maxlen - 3;
-		do {
-			if (n) --n;
-			ws->wsbody[n + 1] = ws->wsbody[n + 2] = ws->wsbody[n + 3] = '.';
-			ws->wsbody[0] = n + 3;
-		} while (n && Get_WS_width(ws, font) > available);
-	}
-	DrawString(ws, x1, y1, x2, y2, font, align, color, C_NONE);
-}
-static void UiText(const char *s, int x1, int y1, int x2, int y2, int font, int align,
-				   const char *color) {
-	wsprintf(ws, "%t", s);
-	UiFit(x1, y1, x2, y2, font, align, color);
-}
-static void UiTextUTF8(const char *s, int x1, int y1, int x2, int y2, int font, const char *color) {
-	utf8_2ws(ws, s, 128);
-	UiFit(x1, y1, x2, y2, font, TEXT_ALIGNLEFT, color);
-}
-
-static int FontS(void) { return GetFontYSIZE(FONT_SMALL_BOLD); }
-static int FooterH(void) { return FontS() + 6; }
-static int ContentTop(void) { return YDISP + GetFontYSIZE(FONT_MEDIUM_BOLD) + FontS() + 14; }
-static int ContentBottom(void) { return ScreenH() - FooterH() - 3; }
-static int RowH(void) { return FontS() * 2 + 8; }
+/* ------------------------------------------------------------------------- formatting */
 
 static void FmtRate(char *buf, int size, unsigned n) {
 	if (n < 1000) snprintf(buf, size, "%u B/s", n);
@@ -89,469 +65,458 @@ static void FmtBytes(char *buf, int size, unsigned n) {
 static void FmtMac(char *buf, int size, const uint8_t *m) {
 	snprintf(buf, size, "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
 }
-
-static void UiStatus(char *buf, int n, const char **color) {
-	if (!pan_running && hooks_patch_state() == PATCH_OLD) {
-		snprintf(buf, n, "Old hook patch"); *color = C_ERR; return;
-	}
-	if (!pan_running && !addr_ok) { snprintf(buf, n, "Choose a PC"); *color = C_WAIT; return; }
-	if (!pan_running) { snprintf(buf, n, "Disconnected"); *color = C_DIM; return; }
-	if (reconnect_wait) { snprintf(buf, n, "Reconnecting..."); *color = C_WAIT; return; }
-	switch (panu.state) {
-		case BT_PANU_STATE_STARTING:
-			snprintf(buf, n, "Starting BT..."); *color = C_WAIT; return;
-		case BT_PANU_STATE_CONNECTING:
-			snprintf(buf, n, "Connecting..."); *color = C_WAIT; return;
-		case BT_PANU_STATE_CONNECTED:
-			if (netif.registered) { snprintf(buf, n, "Connected"); *color = C_OK; return; }
-			if (netif.dhcp_state == BT_PAN_DHCP_SELECTING ||
-				netif.dhcp_state == BT_PAN_DHCP_REQUESTING) {
-				snprintf(buf, n, "Getting IP..."); *color = C_WAIT; return;
-			}
-			snprintf(buf, n, "Connecting..."); *color = C_WAIT; return;
-		case BT_PANU_STATE_STOPPING:
-			snprintf(buf, n, "Disconnecting..."); *color = C_WAIT; return;
-		default:
-			snprintf(buf, n, "Waiting..."); *color = C_DIM; return;
-	}
-}
-
-static int Online(void) { return pan_running && netif.registered; }
-static int Busy(void) { return pan_running && panu.state == BT_PANU_STATE_STOPPING; }
-
-/* A number that changes whenever anything shown on screen changes. */
-static unsigned UiSig(void) {
-	unsigned s = (unsigned)pan_running, i;
-	s = s * 31u + (unsigned)panu.state * 2u + (unsigned)reconnect_wait;
-	s = s * 31u + (unsigned)netif.registered;
-	s = s * 31u + (unsigned)netif.dhcp_state;
-	s = s * 31u + (unsigned)addr_ok * 2u + (unsigned)auto_reconnect;
-	if (netif.registered) s = s * 31u + netif.config.local_ip;
-	s = s * 31u + bt_pan_rx_bytes / 1000u;
-	s = s * 31u + bt_pan_tx_bytes / 1000u;
-	s = s * 31u + (unsigned)peer_count * 2u + (unsigned)peers_busy;
-	for (i = 0; i < 2; ++i) {
-		s = s * 31u + (unsigned)speedtest[i].state;
-		s = s * 31u + speedtest[i].progress;
-		s = s * 31u + speedtest[i].live_bps / 100u;
-	}
-	s = s * 31u + (unsigned)ping_stats.running * 2u + ping_stats.sent;
-	s = s * 31u + ping_stats.hist_n + (unsigned)ping_size_i;
-	s = s * 31u + (unsigned)(uintptr_t)ping_stats.error;
-	return s;
-}
-
-static void Softkeys(const char *left, const char *right) {
-	int fs = FontS(), y = ScreenH() - FooterH(), mid = ScreenW() / 2, ty = y + 3;
-	DrawRectangle(0, y, ScreenW() - 1, ScreenH() - 1, 0, C_PANEL, C_PANEL);
-	UiText(left, 6, ty, mid - 5, ty + fs - 1, FONT_SMALL_BOLD, TEXT_ALIGNLEFT, C_TEXT);
-	UiText(right, mid + 5, ty, ScreenW() - 7, ty + fs - 1, FONT_SMALL_BOLD, TEXT_ALIGNRIGHT, C_DIM);
-}
-
-static void DrawHeader(void) {
-	static const char *tabs[] = {"Link", "Test", "Ping"};
-	int w = ScreenW(), fm = GetFontYSIZE(FONT_MEDIUM_BOLD), fs = FontS(), y, tw = w / UI_TABS, i;
-	UiText("BT PAN", 7, YDISP + 2, w - 53, YDISP + fm + 1, FONT_MEDIUM_BOLD, TEXT_ALIGNLEFT, C_TEXT);
-	UiText(BT_PAN_BUILD_TAG, w - 60, YDISP + 4, w - 7, YDISP + fs + 3, FONT_SMALL, TEXT_ALIGNRIGHT,
-		   C_DIM);
-	y = YDISP + fm + 6;
-	for (i = 0; i < UI_TABS; ++i) {
-		const char *c = ui_tab == i ? C_BLUE : C_DIM, *line = ui_tab == i ? C_BLUE : C_LINE;
-		UiText(tabs[i], i * tw + 3, y, (i + 1) * tw - 4, y + fs - 1, FONT_SMALL_BOLD,
-			   TEXT_ALIGNMIDDLE, c);
-		DrawRectangle(i * tw + 5, y + fs + 2, (i + 1) * tw - 6, y + fs + 3, 0, line, line);
-	}
-}
-
-/* full-width button; selected = filled */
-static void Button(const char *label, int y, int selected, int enabled) {
-	int w = ScreenW(), fs = FontS();
-	const char *fill = !enabled ? C_LINE : selected ? C_BLUE : C_PANEL;
-	DrawRoundedFrame(7, y, w - 8, y + fs + 9, 4, 4, 0, fill, fill);
-	UiText(label, 14, y + 5, w - 15, y + fs + 4, FONT_SMALL_BOLD, TEXT_ALIGNMIDDLE,
-		   !enabled ? C_DIM : selected ? C_BG : C_TEXT);
-}
-
-/* one-line row: label left, value right; selected = filled */
-static void Row1(const char *label, const char *value, int utf8, int y, int selected, int enabled) {
-	int w = ScreenW(), fs = FontS(), lw;
-	const char *fg = selected ? C_BG : enabled ? C_TEXT : C_DIM;
-	if (selected) DrawRoundedFrame(4, y, w - 5, y + fs + 7, 4, 4, 0, C_BLUE, C_BLUE);
-	wsprintf(ws, "%t", label);
-	lw = Get_WS_width(ws, FONT_SMALL_BOLD);
-	DrawString(ws, 10, y + 4, w - 10, y + fs + 3, FONT_SMALL_BOLD, TEXT_ALIGNLEFT, fg, C_NONE);
-	if (utf8) utf8_2ws(ws, value, 128); else wsprintf(ws, "%t", value);
-	UiFit(10 + lw + 8, y + 4, w - 10, y + fs + 3, FONT_SMALL, TEXT_ALIGNRIGHT, selected ? C_BG : C_DIM);
-}
-
-
-/* Tabs "Link" and "Ping" scroll: items are laid out in virtual coordinates (0 = content top),
- * and only items that fit completely in the content area are drawn, so nothing runs over the
- * header or the softkeys. The last row of a tab is "details": it scrolls to the end. */
-#define LINK_ROWS 4
-#define PING_ROWS 3
-static int tab_scroll[UI_TABS];
-static int lk_draw, lk_top, lk_bottom, lk_sel_y, lk_sel_h;
-
-/* place an item of height h at virtual y; 1 = draw it now at *sy */
-static int Place(int y, int h, int row, int *sy) {
-	if (row >= 0 && row == ui_row[ui_tab]) { lk_sel_y = y; lk_sel_h = h; }
-	*sy = lk_top + y - tab_scroll[ui_tab];
-	return lk_draw && *sy + h > lk_top - 3 && *sy < lk_bottom + 3;
-}
-
 static void FmtIp(char *buf, int size, const char *label, uint32_t ip) {
 	snprintf(buf, size, "%s%u.%u.%u.%u", label, (unsigned)(ip & 0xffu), (unsigned)((ip >> 8) & 0xffu),
 			 (unsigned)((ip >> 16) & 0xffu), (unsigned)((ip >> 24) & 0xffu));
 }
-
-static int LinkItems(void) {
-	int w = ScreenW(), fs = FontS(), fm = GetFontYSIZE(FONT_MEDIUM_BOLD), y = 0, sy;
-	char buf[48], num[24], mac[24];
-	const char *col;
-
-	UiStatus(buf, sizeof(buf), &col);
-	if (Place(y, fm + 1, -1, &sy)) UiText(buf, 9, sy, w - 10, sy + fm, FONT_MEDIUM_BOLD, TEXT_ALIGNLEFT, col);
-	y += fm + 4;
-	if (Online()) FmtIp(buf, sizeof(buf), "IP: ", netif.config.local_ip);
-	else snprintf(buf, sizeof(buf), "IP: -");
-	if (Place(y, fs, -1, &sy)) UiText(buf, 9, sy, w - 10, sy + fs - 1, FONT_SMALL_BOLD, TEXT_ALIGNLEFT, Online() ? C_TEXT : C_DIM);
-	y += fs + 6;
-	if (!pan_running && hooks_patch_state() != PATCH_OK) {
-		static const char *const old[] = {"Undo the old hook patch", "and install the new one"};
-		static const char *const none[] = {"No hook patch:", "the browser won't work"};
-		const char *const *t = hooks_patch_state() == PATCH_OLD ? old : none;
-		int i;
-		for (i = 0; i < 2; ++i) {
-			if (Place(y, fs, -1, &sy)) UiText(t[i], 9, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, hooks_patch_state() == PATCH_OLD ? C_ERR : C_WAIT);
-			y += fs + 2;
-		}
-		y += 4;
-	}
-
-	if (Place(y, fs + 10, 0, &sy))
-		Button(pan_running ? (Busy() ? "Please wait..." : "Disconnect") : "Connect", sy,
-			   ui_row[0] == 0, !Busy() && (pan_running || (addr_ok && hooks_patch_state() != PATCH_OLD)));
-	y += fs + 17;
-
-	FmtMac(mac, sizeof(mac), panu_config.peer_addr);
-	if (Place(y, fs + 8, 1, &sy)) {
-		if (!addr_ok) Row1("Computer", "choose", 0, sy, ui_row[0] == 1, !pan_running);
-		else if (cfg.name[0]) Row1("Computer", cfg.name, 1, sy, ui_row[0] == 1, !pan_running);
-		else Row1("Computer", mac, 0, sy, ui_row[0] == 1, !pan_running);
-	}
-	y += fs + 10;
-	if (Place(y, fs + 8, 2, &sy))
-		Row1("Auto-reconnect", auto_reconnect ? "on" : "off", 0, sy, ui_row[0] == 2, 1);
-	y += fs + 12;
-
-	if (addr_ok && cfg.name[0]) {
-		snprintf(buf, sizeof(buf), "PC: %s", mac);
-		if (Place(y, fs, -1, &sy)) UiText(buf, 9, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM);
-		y += fs + 3;
-	}
-	if (Online()) {
-		FmtIp(buf, sizeof(buf), "Gateway: ", pan_server_ip());
-		if (Place(y, fs, -1, &sy)) UiText(buf, 9, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM);
-		y += fs + 3;
-		if (netif.config.dns1) {
-			FmtIp(buf, sizeof(buf), "DNS: ", netif.config.dns1);
-			if (Place(y, fs, -1, &sy)) UiText(buf, 9, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM);
-			y += fs + 3;
-		}
-		/* L2CAP tx/rx MTU (EL71: negotiated; 1691 = the MTU patch works) and the IP packet limit */
-		snprintf(buf, sizeof(buf), "MTU: L2CAP %u/%u, IP %u", (unsigned)panu.neg_tx_mtu,
-				 (unsigned)panu.neg_rx_mtu, bt_pan_netif_tx_max());
-		if (Place(y, fs, -1, &sy)) UiText(buf, 9, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM);
-		y += fs + 3;
-	}
-	FmtBytes(num, sizeof(num), bt_pan_rx_bytes);
-	snprintf(buf, sizeof(buf), "Received: %s", num);
-	if (Place(y, fs, 3, &sy)) UiText(buf, 9, sy, w - 10, sy + fs - 1, FONT_SMALL_BOLD, TEXT_ALIGNLEFT, C_BLUE);
-	y += fs + 2;
-	FmtBytes(num, sizeof(num), bt_pan_tx_bytes);
-	snprintf(buf, sizeof(buf), "Sent: %s", num);
-	if (Place(y, fs, -1, &sy)) UiText(buf, 9, sy, w - 10, sy + fs - 1, FONT_SMALL_BOLD, TEXT_ALIGNLEFT, C_OK);
-	y += fs + 2;
-	return y;
-}
-
-/* end = 1: show the end whatever is selected (a running ping: the numbers, Stop on the softkey) */
-static void DrawScrolled(int (*items)(void), int rows, int end) {
-	int total, view, max, *scroll = &tab_scroll[ui_tab], row = ui_row[ui_tab];
-
-	lk_top = ContentTop() + 3;
-	lk_bottom = ContentBottom();
-	view = lk_bottom - lk_top;
-	lk_draw = 0;
-	lk_sel_y = 0; lk_sel_h = 0;
-	total = items();
-	max = total > view ? total - view : 0;
-	if (end || row == rows - 1) *scroll = max;  /* the details at the end */
-	else {
-		if (lk_sel_y < *scroll) *scroll = lk_sel_y;
-		if (lk_sel_y + lk_sel_h > *scroll + view) *scroll = lk_sel_y + lk_sel_h - view;
-		if (row == 0) *scroll = 0; /* what is above the first button */
-	}
-	if (*scroll > max) *scroll = max;
-	if (*scroll < 0) *scroll = 0;
-	lk_draw = 1;
-	items();
-	if (max) { /* scroll bar */
-		int bh = view * view / total, by = lk_top + (view - bh) * *scroll / max;
-		DrawRectangle(ScreenW() - 3, lk_top, ScreenW() - 2, lk_bottom, 0, C_PANEL, C_PANEL);
-		DrawRectangle(ScreenW() - 3, by, ScreenW() - 2, by + bh, 0, C_DIM, C_DIM);
-	}
-}
-
-static void DrawLink(void) {
-	DrawScrolled(LinkItems, LINK_ROWS, 0);
-	Softkeys(ui_row[0] == 1 ? "Select" : ui_row[0] == 2 ? "Change" : ui_row[0] == 3 ? ""
-			 : pan_running ? "Disconnect" : "Connect", "Exit");
-}
-
-/* label left, value right, not selectable */
-static void Pair(const char *label, const char *value, int sy, const char *color) {
-	int w = ScreenW(), fs = FontS(), lw;
-	wsprintf(ws, "%t", label);
-	lw = Get_WS_width(ws, FONT_SMALL);
-	DrawString(ws, 10, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM, C_NONE);
-	wsprintf(ws, "%t", value);
-	UiFit(10 + lw + 6, sy, w - 10, sy + fs - 1, FONT_SMALL_BOLD, TEXT_ALIGNRIGHT, color);
-}
-
-/* one test's results below its button, laid out like the Link tab (Place) */
-static int TestResult(int which, int y) {
-	struct speedtest_state *t = &speedtest[which];
-	int w = ScreenW(), fs = FontS(), sy;
-	char buf[48], r[24];
-	if (t->state == SPT_IDLE) {
-		if (Place(y, fs, -1, &sy)) UiText("Not run yet", 12, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM);
-		return y + fs + 2;
-	}
-	if (t->state == SPT_ERR) {
-		if (Place(y, fs, -1, &sy)) UiText(t->error ? t->error : "Error", 12, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_ERR);
-		y += fs + 2;
-	}
-	if (t->state == SPT_RUN) {
-		if (Place(y, fs + 3, -1, &sy)) {
-			int x0 = 12, x1 = w - 10, fill = x0 + (x1 - x0) * (int)t->progress / 100;
-			DrawRoundedFrame(x0, sy, x1, sy + fs + 2, 3, 3, 0, C_PANEL, C_PANEL);
-			if (fill > x0 + 1) DrawRoundedFrame(x0, sy, fill, sy + fs + 2, 3, 3, 0, C_OK, C_OK);
-			snprintf(buf, sizeof(buf), "%s %u%%", t->dir == SPT_DL ? "download" : "upload", t->progress);
-			UiText(buf, x0, sy + 1, x1, sy + fs, FONT_SMALL_BOLD, TEXT_ALIGNMIDDLE, C_TEXT);
-		}
-		y += fs + 6;
-	}
-	{
-		unsigned dl = t->state == SPT_RUN && t->dir == SPT_DL ? t->live_bps : t->dl_bps;
-		if (dl || t->state != SPT_ERR) FmtRate(r, sizeof(r), dl); else snprintf(r, sizeof(r), "-");
-		if (Place(y, fs, -1, &sy)) Pair("Download", r, sy, C_TEXT);
-		y += fs + 2;
-	}
-	if (t->state == SPT_RUN && t->dir == SPT_DL) snprintf(r, sizeof(r), "...");
-	else FmtRate(r, sizeof(r), t->state == SPT_RUN ? t->live_bps : t->ul_bps);
-	if (Place(y, fs, -1, &sy)) Pair("Upload", r, sy, C_TEXT);
-	return y + fs + 2;
-}
-
-static int TestItems(void) {
-	static const char *titles[] = {"Direct (BT, UDP)", "Via stack (TCP)"};
-	int fs = FontS(), y = 0, sy, i, running = speedtest_running();
-	for (i = 0; i < 2; ++i) {
-		const char *label = speedtest[i].state == SPT_RUN ? "Stop" : titles[i];
-		if (Place(y, fs + 10, i, &sy))
-			Button(label, sy, ui_row[1] == i, Online() && (!running || speedtest[i].state == SPT_RUN));
-		y += fs + 14;
-		y = TestResult(i, y) + 6;
-	}
-	if (!Online()) {
-		if (Place(y, fs, -1, &sy)) UiText("Connect first", 9, sy, ScreenW() - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM);
-		y += fs + 2;
-	}
-	return y;
-}
-
-static void DrawTest(void) {
-	DrawScrolled(TestItems, 2, 0); /* the second test: scrolled to the end, its results visible */
-	Softkeys(speedtest[ui_row[1]].state == SPT_RUN ? "Stop" : "Start", "Exit");
-}
-
-static unsigned PingSize(void) {
-	unsigned size = ping_sizes[ping_size_i], max = ping_max_size();
-	return size < max ? size : max;
-}
-
 static void FmtRtt(char *buf, int size, unsigned us) {
 	if (us == PING_LOST) snprintf(buf, size, "timeout");
 	else if (us < 10000) snprintf(buf, size, "%u.%u ms", us / 1000, us % 1000 / 100);
 	else snprintf(buf, size, "%u ms", (us + 500) / 1000);
 }
 
-static int PingItems(void) {
+static const char *UiStatus(void) {
+	if (!pan_running && ui_patch == PATCH_OLD) return "Old hook patch";
+	if (!pan_running && !addr_ok) return "Choose a PC";
+	if (!pan_running) return "Disconnected";
+	if (reconnect_wait) return "Reconnecting...";
+	switch (panu.state) {
+		case BT_PANU_STATE_STARTING: return "Starting BT...";
+		case BT_PANU_STATE_CONNECTING: return "Connecting...";
+		case BT_PANU_STATE_CONNECTED:
+			if (netif.registered) return "Connected";
+			if (netif.dhcp_state == BT_PAN_DHCP_SELECTING || netif.dhcp_state == BT_PAN_DHCP_REQUESTING)
+				return "Getting IP...";
+			return "Connecting...";
+		case BT_PANU_STATE_STOPPING: return "Disconnecting...";
+		default: return "Waiting...";
+	}
+}
+
+static int Online(void) { return pan_running && netif.registered; }
+static int Busy(void) { return pan_running && panu.state == BT_PANU_STATE_STOPPING; }
+
+static unsigned PingSize(void) {
+	unsigned size = ping_sizes[ping_size_i], max = ping_max_size();
+	return size < max ? size : max;
+}
+
+/* ------------------------------------------------------------------------- menus */
+
+/* Every screen is a list of row ids built from the state; the cursor follows its row id when
+ * rows come and go. */
+enum { SCR_MAIN, SCR_TEST, SCR_PING, SCR_PICK, SCR_N };
+#define ROWS_MAX 24
+typedef struct {
+	int id;                    /* GUI id, 0 = not open */
+	int n;                     /* rows */
+	unsigned char row[ROWS_MAX];
+	unsigned sig_state, sig_live;
+	const char *left;          /* left softkey label shown */
+} SCREEN;
+static SCREEN scr[SCR_N];
+
+enum {
+	M_CONNECT, M_STATUS, M_HINT, M_PC, M_AUTO, M_IP, M_GW, M_DNS, M_MTU, M_RX, M_TX,
+	M_TEST, M_PING, M_MIN, M_EXIT
+};
+enum { T_BTN0, T_RUN0, T_DL0, T_UL0, T_BTN1, T_RUN1, T_DL1, T_UL1, T_HINT };
+enum { P_BTN, P_SIZE, P_TO, P_ERR, P_LAST, P_REPLIES, P_LOST, P_AVG, P_MINMAX, P_HIST };
+
+static int Rows(int s, unsigned char *r) {
+	int n = 0, i;
+	switch (s) {
+		case SCR_MAIN:
+			r[n++] = M_CONNECT; r[n++] = M_STATUS;
+			if (!pan_running && ui_patch != PATCH_OK) r[n++] = M_HINT;
+			r[n++] = M_PC; r[n++] = M_AUTO;
+			if (Online()) {
+				r[n++] = M_IP; r[n++] = M_GW;
+				if (netif.config.dns1) r[n++] = M_DNS;
+				r[n++] = M_MTU;
+			}
+			r[n++] = M_RX; r[n++] = M_TX; r[n++] = M_TEST; r[n++] = M_PING; r[n++] = M_MIN;
+			r[n++] = M_EXIT;
+			break;
+		case SCR_TEST:
+			for (i = 0; i < 2; ++i) {
+				int st = speedtest[i].state, b = i ? T_BTN1 : T_BTN0;
+				r[n++] = b;
+				if (st == SPT_RUN || st == SPT_ERR) r[n++] = b + 1;
+				if (st != SPT_IDLE) { r[n++] = b + 2; r[n++] = b + 3; }
+			}
+			if (!Online()) r[n++] = T_HINT;
+			break;
+		case SCR_PING: {
+			struct ping_stats *p = &ping_stats;
+			r[n++] = P_BTN; r[n++] = P_SIZE;
+			if (Online() || p->sent) r[n++] = P_TO;
+			if (p->error || (!Online() && !p->sent)) r[n++] = P_ERR;
+			if (p->sent) {
+				r[n++] = P_LAST; r[n++] = P_REPLIES; r[n++] = P_LOST;
+				if (p->received) { r[n++] = P_AVG; r[n++] = P_MINMAX; }
+				if (p->hist_n) r[n++] = P_HIST;
+			}
+			break;
+		}
+		default:
+			n = peer_count ? peer_count : 1;
+			if (n > ROWS_MAX) n = ROWS_MAX;
+			for (i = 0; i < n; ++i) r[i] = (unsigned char)i;
+			break;
+	}
+	return n;
+}
+
+static int RowAt(int s, int item) {
+	return item >= 0 && item < scr[s].n ? scr[s].row[item] : -1;
+}
+
+/* signatures of what a screen shows: "state" = rows and texts that change seldom (shown at
+ * once), "live" = counters (shown at most once a second) */
+#define MIX(s, v) ((s) = (s) * 31u + (unsigned)(v))
+static void Sig(int s, unsigned *st, unsigned *live) {
+	unsigned a = 0, b = 0, i;
+	MIX(a, pan_running); MIX(a, panu.state); MIX(a, reconnect_wait); MIX(a, netif.registered);
+	MIX(a, Busy());
+	switch (s) {
+		case SCR_MAIN:
+			MIX(a, netif.dhcp_state); MIX(a, addr_ok); MIX(a, auto_reconnect); MIX(a, cfg.name[0]);
+			MIX(a, panu_config.peer_addr[5]); MIX(a, panu_config.peer_addr[4]); MIX(a, ping_stats.running);
+			if (Online()) {
+				MIX(a, netif.config.local_ip); MIX(a, netif.config.dns1); MIX(a, pan_server_ip());
+				MIX(a, panu.neg_tx_mtu); MIX(a, panu.neg_rx_mtu);
+			}
+			MIX(b, bt_pan_rx_bytes / 100u); MIX(b, bt_pan_tx_bytes / 100u);
+			MIX(b, rate_rx / 100u); MIX(b, rate_tx / 100u);
+			break;
+		case SCR_TEST:
+			for (i = 0; i < 2; ++i) {
+				MIX(a, speedtest[i].state); MIX(a, speedtest[i].dir); MIX(a, (uintptr_t)speedtest[i].error);
+				MIX(a, speedtest[i].dl_bps); MIX(a, speedtest[i].ul_bps);
+				MIX(b, speedtest[i].progress); MIX(b, speedtest[i].live_bps / 100u);
+			}
+			MIX(a, speedtest_running());
+			break;
+		case SCR_PING:
+			MIX(a, ping_stats.running); MIX(a, ping_stats.sent != 0); MIX(a, ping_stats.received != 0);
+			MIX(a, ping_stats.hist_n != 0); MIX(a, (uintptr_t)ping_stats.error); MIX(a, ping_size_i);
+			MIX(b, ping_stats.sent); MIX(b, ping_stats.received); MIX(b, ping_stats.last_us);
+			break;
+		default:
+			MIX(a, peer_count); MIX(a, peers_busy);
+			break;
+	}
+	*st = a;
+	*live = b;
+}
+
+static void ItemText(void *gui, int item_n, const char *text) {
+	void *item = AllocMenuItem(gui);
+	WSHDR *w = AllocMenuWS(gui, 128);
+	wsprintf(w, "%t", text);
+	SetMenuItemText(gui, item, w, item_n);
+}
+
+static void MainItem(void *gui, int item_n, void *user) {
+	char b[64], v[24];
+	(void)user;
+	switch (RowAt(SCR_MAIN, item_n)) {
+		case M_CONNECT:
+			ItemText(gui, item_n, pan_running ? (Busy() ? "Please wait..." : "Disconnect") : "Connect");
+			return;
+		case M_STATUS: snprintf(b, sizeof(b), "Status: %s", UiStatus()); break;
+		case M_HINT:
+			ItemText(gui, item_n, ui_patch == PATCH_OLD ? "Undo the old hook patch, install the new one"
+													   : "No hook patch: the browser won't work");
+			return;
+		case M_PC: {
+			void *item = AllocMenuItem(gui);
+			WSHDR *w = AllocMenuWS(gui, 128);
+			if (!addr_ok) wsprintf(w, "%t", "PC: choose...");
+			else {
+				FmtMac(v, sizeof(v), panu_config.peer_addr);
+				if (cfg.name[0] && ui_tmp) {
+					wsprintf(w, "%t", "PC: ");
+					utf8_2ws(ui_tmp, cfg.name, 60);
+					wstrcat(w, ui_tmp);
+					wsprintf(ui_tmp, " (%t)", v);
+					wstrcat(w, ui_tmp);
+				} else wsprintf(w, "PC: %t", v);
+			}
+			SetMenuItemText(gui, item, w, item_n);
+			return;
+		}
+		case M_AUTO: snprintf(b, sizeof(b), "Auto-reconnect: %s", auto_reconnect ? "on" : "off"); break;
+		case M_IP: FmtIp(b, sizeof(b), "IP: ", netif.config.local_ip); break;
+		case M_GW: FmtIp(b, sizeof(b), "Gateway: ", pan_server_ip()); break;
+		case M_DNS: FmtIp(b, sizeof(b), "DNS: ", netif.config.dns1); break;
+		case M_MTU:
+			/* L2CAP tx/rx MTU (EL71: negotiated; 1691 = the MTU patch works) and the IP limit */
+			snprintf(b, sizeof(b), "MTU: L2CAP %u/%u, IP %u", (unsigned)panu.neg_tx_mtu,
+					 (unsigned)panu.neg_rx_mtu, bt_pan_netif_tx_max());
+			break;
+		case M_RX: case M_TX: {
+			int rx = RowAt(SCR_MAIN, item_n) == M_RX;
+			int l = snprintf(b, sizeof(b), rx ? "Received: " : "Sent: ");
+			FmtBytes(b + l, sizeof(b) - l, rx ? bt_pan_rx_bytes : bt_pan_tx_bytes);
+			if (Online()) {
+				FmtRate(v, sizeof(v), rx ? rate_rx : rate_tx);
+				l = strlen(b);
+				snprintf(b + l, sizeof(b) - l, ", %s", v);
+			}
+			break;
+		}
+		case M_TEST: ItemText(gui, item_n, "Speed test..."); return;
+		case M_PING: ItemText(gui, item_n, ping_stats.running ? "Ping... (running)" : "Ping..."); return;
+		case M_MIN: ItemText(gui, item_n, "Minimize"); return;
+		default: ItemText(gui, item_n, pan_running ? "Disconnect and exit" : "Exit"); return;
+	}
+	ItemText(gui, item_n, b);
+}
+
+static void TestItem(void *gui, int item_n, void *user) {
+	static const char *titles[] = {"Direct (BT, UDP)", "Via stack (TCP)"};
+	int r = RowAt(SCR_TEST, item_n), i = r >= T_BTN1 && r <= T_UL1;
+	struct speedtest_state *t = &speedtest[i];
+	char b[64], v[24];
+	(void)user;
+	if (r == T_HINT) { ItemText(gui, item_n, "Connect first"); return; }
+	switch (r - (i ? T_BTN1 : T_BTN0)) {
+		case 0: snprintf(b, sizeof(b), "%s: %s", titles[i], t->state == SPT_RUN ? "stop" : "start"); break;
+		case 1:
+			if (t->state == SPT_ERR) snprintf(b, sizeof(b), "  %s", t->error ? t->error : "Error");
+			else snprintf(b, sizeof(b), "  %s %u%%", t->dir == SPT_DL ? "Download" : "Upload", t->progress);
+			break;
+		case 2: {
+			unsigned dl = t->state == SPT_RUN && t->dir == SPT_DL ? t->live_bps : t->dl_bps;
+			if (dl || t->state != SPT_ERR) FmtRate(v, sizeof(v), dl); else snprintf(v, sizeof(v), "-");
+			snprintf(b, sizeof(b), "  Download: %s", v);
+			break;
+		}
+		default:
+			if (t->state == SPT_RUN && t->dir == SPT_DL) snprintf(v, sizeof(v), "...");
+			else FmtRate(v, sizeof(v), t->state == SPT_RUN ? t->live_bps : t->ul_bps);
+			snprintf(b, sizeof(b), "  Upload: %s", v);
+			break;
+	}
+	ItemText(gui, item_n, b);
+}
+
+static void PingItem(void *gui, int item_n, void *user) {
 	struct ping_stats *p = &ping_stats;
-	int w = ScreenW(), fs = FontS(), fm = GetFontYSIZE(FONT_MEDIUM_BOLD), y = 0, sy, gh;
-	char buf[40], v[24];
-	unsigned n, i, lost = p->sent - p->received;
-
-	if (Place(y, fs + 10, 0, &sy))
-		Button(p->running ? "Stop" : "Ping the PC", sy, ui_row[2] == 0, p->running || Online());
-	y += fs + 17;
-	snprintf(v, sizeof(v), "%u B", PingSize());
-	if (Place(y, fs + 8, 1, &sy)) Row1("Size", v, 0, sy, ui_row[2] == 1, !p->running);
-	y += fs + 12;
-	if (Online() || p->sent) {
-		FmtIp(buf, sizeof(buf), "To ", pan_server_ip());
-		if (Place(y, fs, -1, &sy)) UiText(buf, 9, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM);
-		y += fs + 3;
-	}
-	if (p->error) {
-		if (Place(y, fs, -1, &sy)) UiText(p->error, 9, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_ERR);
-		y += fs + 3;
-	} else if (!Online() && !p->sent) {
-		if (Place(y, fs, -1, &sy)) UiText("Connect first", 9, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM);
-		y += fs + 3;
-	}
-	if (!p->sent) return y;
-
-	/* last round trip, big */
-	FmtRtt(v, sizeof(v), p->last_us);
-	if (Place(y, fm + 1, 2, &sy))
-		UiText(p->hist_n ? v : "...", 9, sy, w - 10, sy + fm, FONT_MEDIUM_BOLD, TEXT_ALIGNLEFT,
-			   !p->hist_n ? C_DIM : p->last_us == PING_LOST ? C_ERR : C_OK);
-	y += fm + 4;
-	snprintf(v, sizeof(v), "%u / %u", p->received, p->sent);
-	if (Place(y, fs, -1, &sy)) Pair("Replies", v, sy, C_TEXT);
-	y += fs + 2;
-	snprintf(v, sizeof(v), "%u (%u%%)", lost, p->sent ? lost * 100u / p->sent : 0);
-	if (Place(y, fs, -1, &sy)) Pair("Lost", v, sy, lost ? C_ERR : C_TEXT);
-	y += fs + 2;
-	if (p->received) {
-		FmtRtt(v, sizeof(v), p->sum_us / p->received);
-		if (Place(y, fs, -1, &sy)) Pair("Average", v, sy, C_TEXT);
-		y += fs + 2;
-		FmtRtt(buf, sizeof(buf), p->min_us);
-		FmtRtt(v, sizeof(v), p->max_us);
-		snprintf(buf + strlen(buf) - 3, sizeof(buf) - strlen(buf) + 3, "-%s", v); /* "12-40 ms" */
-		if (Place(y, fs, -1, &sy)) Pair("Min-max", buf, sy, C_TEXT);
-		y += fs + 2;
-	}
-
-	/* the last round trips as bars, newest right; lost = red full height */
-	gh = fs * 2 + 4;
-	n = p->hist_n < PING_HIST ? p->hist_n : PING_HIST;
-	if (n && Place(y + 3, gh, -1, &sy)) {
-		int x0 = 9, x1 = w - 10, bw = (x1 - x0 + 1) / (int)PING_HIST, top = 1;
-		unsigned scale = 1;
-		if (bw < 2) bw = 2;
-		for (i = 0; i < n; ++i) {
-			unsigned us = p->hist[(p->hist_n - 1 - i) % PING_HIST];
-			if (us != PING_LOST && us > scale) scale = us;
+	char b[64], v[24];
+	unsigned lost = p->sent - p->received;
+	(void)user;
+	switch (RowAt(SCR_PING, item_n)) {
+		case P_BTN: ItemText(gui, item_n, p->running ? "Stop" : "Ping the PC"); return;
+		case P_SIZE: snprintf(b, sizeof(b), "Size: %u B", PingSize()); break;
+		case P_TO: FmtIp(b, sizeof(b), "To: ", pan_server_ip()); break;
+		case P_ERR: ItemText(gui, item_n, p->error ? p->error : "Connect first"); return;
+		case P_LAST:
+			FmtRtt(v, sizeof(v), p->last_us);
+			snprintf(b, sizeof(b), "Last: %s", p->hist_n ? v : "...");
+			break;
+		case P_REPLIES: snprintf(b, sizeof(b), "Replies: %u / %u", p->received, p->sent); break;
+		case P_LOST: snprintf(b, sizeof(b), "Lost: %u (%u%%)", lost, p->sent ? lost * 100u / p->sent : 0); break;
+		case P_AVG:
+			FmtRtt(v, sizeof(v), p->received ? p->sum_us / p->received : 0);
+			snprintf(b, sizeof(b), "Average: %s", v);
+			break;
+		case P_MINMAX: {
+			char lo[24];
+			FmtRtt(lo, sizeof(lo), p->min_us);
+			FmtRtt(v, sizeof(v), p->max_us);
+			if (strlen(lo) > 3) lo[strlen(lo) - 3] = 0; /* "12-40 ms" */
+			snprintf(b, sizeof(b), "Min-max: %s-%s", lo, v);
+			break;
 		}
-		DrawRectangle(x0, sy, x1, sy + gh - 1, 0, C_PANEL, C_PANEL);
-		for (i = 0; i < n && x1 - (int)(i + 1) * bw + 1 >= x0; ++i) {
-			unsigned us = p->hist[(p->hist_n - 1 - i) % PING_HIST];
-			int bx1 = x1 - (int)i * bw, bx0 = bx1 - bw + 2, h;
-			if (us == PING_LOST) h = gh - 2;
-			else h = top + (int)((uint64_t)us * (unsigned)(gh - 2 - top) / scale);
-			DrawRectangle(bx0, sy + gh - 1 - h, bx1, sy + gh - 2, 0,
-						  us == PING_LOST ? C_ERR : C_BLUE, us == PING_LOST ? C_ERR : C_BLUE);
+		default: { /* the last round trips in ms, newest first; x = lost */
+			unsigned n = p->hist_n < 8 ? p->hist_n : 8, i;
+			int l = snprintf(b, sizeof(b), "Last %u:", n);
+			for (i = 0; i < n && l < (int)sizeof(b) - 8; ++i) {
+				unsigned us = p->hist[(p->hist_n - 1 - i) % PING_HIST];
+				if (us == PING_LOST) l += snprintf(b + l, sizeof(b) - l, " x");
+				else l += snprintf(b + l, sizeof(b) - l, " %u", (us + 500) / 1000);
+			}
+			break;
 		}
 	}
-	y += gh + 5;
-	return y;
+	ItemText(gui, item_n, b);
 }
 
-static void DrawPing(void) {
-	DrawScrolled(PingItems, PING_ROWS, ping_stats.running && ui_row[2] == 0);
-	Softkeys(ui_row[2] == 1 ? (ping_stats.running ? "" : "Change") : ui_row[2] == 2 ? ""
-			 : ping_stats.running ? "Stop" : "Start", "Exit");
-}
-
-static void PingAction(void) {
-	if (ui_row[2] == 1) {
-		if (!ping_stats.running) ping_size_i = (ping_size_i + 1) % (int)(sizeof(ping_sizes) / sizeof(ping_sizes[0]));
+static void PickItem(void *gui, int item_n, void *user) {
+	char mac[24];
+	void *item;
+	WSHDR *w;
+	(void)user;
+	if (!peer_count || item_n >= peer_count) {
+		ItemText(gui, item_n, peers_busy ? "Reading list..." : "List is empty: left = refresh");
 		return;
 	}
-	if (ui_row[2] != 0) return;
-	if (ping_stats.running) {
-		GBS_SendMessage(BT_PANU_PROCESS_CEPID, BT_PANU_MESSAGE_PING_STOP, 0, 0, 0);
-		ping_stats.running = 0; /* shown at once */
-	} else if (Online()) {
-		ping_stats.running = 1; /* shown at once; the BTPAN process starts it */
-		ping_stats.error = NULL;
-		GBS_SendMessage(BT_PANU_PROCESS_CEPID, BT_PANU_MESSAGE_PING_START, 0, (void *)PingSize(), 0);
+	item = AllocMenuItem(gui);
+	w = AllocMenuWS(gui, 128);
+	FmtMac(mac, sizeof(mac), peers[item_n].mac);
+	if (peers[item_n].name[0] && ui_tmp) {
+		utf8_2ws(w, peers[item_n].name, 60);
+		wsprintf(ui_tmp, " (%t)", mac);
+		wstrcat(w, ui_tmp);
+	} else wsprintf(w, "Device %t", mac);
+	SetMenuItemText(gui, item, w, item_n);
+}
+
+/* left softkey per row (the right one is fixed: Exit on the main screen, Back elsewhere) */
+static const char *LeftLabel(int s, int item) {
+	int r = RowAt(s, item);
+	switch (s) {
+		case SCR_MAIN:
+			if (r == M_CONNECT) return pan_running ? (Busy() ? "" : "Disconnect") : "Connect";
+			if (r == M_PC) return pan_running ? "" : "Choose";
+			if (r == M_AUTO) return "Change";
+			if (r == M_TEST || r == M_PING) return "Open";
+			if (r == M_MIN || r == M_EXIT) return "Select";
+			return "";
+		case SCR_TEST:
+			if (r == T_BTN0 || r == T_BTN1) return speedtest[r == T_BTN1].state == SPT_RUN ? "Stop" : "Start";
+			return "";
+		case SCR_PING:
+			if (r == P_BTN) return ping_stats.running ? "Stop" : "Start";
+			if (r == P_SIZE) return ping_stats.running ? "" : "Change";
+			return "";
+		default:
+			return peer_count ? "Select" : peers_busy ? "" : "Refresh";
 	}
 }
 
-static void DrawPicker(void) {
-	int w = ScreenW(), fs = FontS(), y = ContentTop() + 3, visible, i;
-	char mac[24];
-	UiText(peers_busy ? "Reading list..." : peer_count ? "Paired devices" : "List is empty",
-		   8, y, w - 8, y + fs, FONT_SMALL_BOLD, TEXT_ALIGNLEFT, C_TEXT);
-	y += fs + 6;
-	visible = (ContentBottom() - y - 4) / RowH();
-	if (visible < 1) visible = 1;
-	if (picker_row >= peer_count) picker_row = peer_count ? peer_count - 1 : 0;
-	if (picker_row < picker_top) picker_top = picker_row;
-	if (picker_row >= picker_top + visible) picker_top = picker_row - visible + 1;
-	for (i = picker_top; i < peer_count && i < picker_top + visible; ++i) {
-		FmtMac(mac, sizeof(mac), peers[i].mac);
-		if (i == picker_row) DrawRoundedFrame(4, y, w - 5, y + RowH() - 3, 4, 4, 0, C_BLUE, C_BLUE);
-		if (peers[i].name[0]) UiTextUTF8(peers[i].name, 10, y + 2, w - 10, y + fs + 1, FONT_SMALL_BOLD, i == picker_row ? C_BG : C_TEXT);
-		else UiText("Device", 10, y + 2, w - 10, y + fs + 1, FONT_SMALL_BOLD, TEXT_ALIGNLEFT, i == picker_row ? C_BG : C_TEXT);
-		UiText(mac, 10, y + fs + 4, w - 10, y + fs * 2 + 3, FONT_SMALL, TEXT_ALIGNLEFT, i == picker_row ? C_BG : C_DIM);
-		y += RowH();
+static void SoftkeysUpdate(int s, void *gui) {
+	static SOFTKEY_DESC left[SCR_N], right[SCR_N];
+	const char *l = LeftLabel(s, GetCurMenuItem(gui));
+	if (l == scr[s].left) return;  /* the same text: nothing to tell the firmware */
+	scr[s].left = l;
+	left[s].key1 = 0x0018; left[s].lgp_id = (int)l;
+	right[s].key1 = 0x0001; right[s].lgp_id = (int)(s == SCR_MAIN ? "Exit" : "Back");
+	SetMenuSoftKey(gui, &left[s], SET_LEFT_SOFTKEY);
+	SetMenuSoftKey(gui, &right[s], SET_RIGHT_SOFTKEY);
+}
+
+static void UiKick(void);
+
+/* rebuild the rows of a screen and give the menu its texts again; the cursor stays on its row */
+static void Sync(int s) {
+	SCREEN *c = &scr[s];
+	void *gui = c->id ? FindGUIbyId(c->id, NULL) : NULL;
+	int cur, old, i, n;
+	unsigned char row[ROWS_MAX];
+	if (!gui) return;
+	cur = GetCurMenuItem(gui);
+	old = RowAt(s, cur);
+	n = Rows(s, row);
+	for (i = 0; i < n && old >= 0; ++i)
+		if (row[i] == old) break;
+	if (old >= 0 && i < n) cur = i;
+	if (cur >= n) cur = n - 1;
+	if (cur < 0) cur = 0;
+	memcpy(c->row, row, n);
+	c->n = n;
+	Sig(s, &c->sig_state, &c->sig_live);
+	Menu_SetItemCountDyn(gui, n);
+	SetCursorToMenuItem(gui, cur);
+	c->left = NULL; /* the row under the cursor may have a new label */
+	SoftkeysUpdate(s, gui);
+	if (IsGuiOnTop(c->id)) RefreshGUI();
+	UiKick();
+}
+
+static int ui_opening = -1;   /* the screen whose CreateMenu runs (its hooks come before the id) */
+
+static int ScreenOf(GUI *gui) {
+	int s;
+	for (s = 0; s < SCR_N; ++s)
+		if (scr[s].id && FindGUIbyId(scr[s].id, NULL) == (void *)gui) return s;
+	return ui_opening >= 0 ? ui_opening : SCR_MAIN;
+}
+
+static void Hook(GUI *gui, int cmd) {
+	int s = ScreenOf(gui);
+	if (cmd == UI_CMD_FOCUS) {
+		/* back on top (after a submenu, a message, another app): fresh rows and texts */
+		scr[s].n = Rows(s, scr[s].row);
+		Sig(s, &scr[s].sig_state, &scr[s].sig_live);
+		Menu_SetItemCountDyn(gui, scr[s].n);
+		scr[s].left = NULL;
+	} else if (cmd == UI_CMD_REDRAW) {
+		SoftkeysUpdate(s, gui);
+	} else if (cmd == UI_CMD_DESTROY && s != SCR_MAIN && scr[s].id) {
+		/* closed not by our Back (SubKey zeroes the id first) */
+		if (s == SCR_PICK) GBS_SendMessage(BT_PANU_PROCESS_CEPID, BT_PANU_MESSAGE_PEERS_STOP, 0, 0, 0);
+		scr[s].id = 0;
 	}
-	Softkeys(peer_count ? "Select" : "Refresh", "Back");
 }
 
-static void gui_onredraw(GUI *data) {
-	static int traced;
-	(void)data;
-	if (traced < 2) trace(traced++ ? "R second redraw" : "R first redraw");
-	DrawRectangle(0, YDISP, ScreenW() - 1, ScreenH() - 1, 0, C_BG, C_BG);
-	if (ui_picker) DrawPicker();
-	else if (ui_tab == 0) DrawLink();
-	else if (ui_tab == 1) DrawTest();
-	else DrawPing();
-	/* header last: covers a scrolled item cut at the top */
-	DrawRectangle(0, YDISP, ScreenW() - 1, ContentTop() + 2, 0, C_BG, C_BG);
-	DrawHeader();
+/* Key of a menu: 'S' = select (left soft / centre), 'B' = back (right soft), else the key, 0 =
+ * nothing. On S65 the softkeys come as an action (msg->keys = the SOFTKEY_DESC key: 0x18/0x3D
+ * select, 0x01 back), KEY_DOWN RIGHT_SOFT alone did not come (s65-player, phone 2026-11-13). */
+static int MenuAct(GUI_MSG *msg) {
+	int k = msg->gbsmsg->submess;
+#ifdef SGOLD
+	if (msg->keys == 0x18 || msg->keys == 0x3D) return 'S';
+	if (msg->keys == 0x01) return 'B';
+#endif
+	if (msg->gbsmsg->msg != KEY_DOWN) return 0;
+	if (k == LEFT_SOFT || k == ENTER_BUTTON) return 'S';
+	if (k == RIGHT_SOFT) return 'B';
+	return k;
 }
 
-static void gui_oncreate(GUI *data, malloc_func_t alloc) {
-	(void)alloc;
-	trace("G gui oncreate");
-	data->state = CSM_GUI_STATE_UNFOCUSED;
-	((MAIN_GUI *)data)->ws = ws = AllocWS(256);
-	gui_focused = 1;  /* assume focus until onunfocus says otherwise */
+static HEADER_DESC hdr[SCR_N] = {
+	{{0, 0, 0, 0}, NULL, (int)"BT PAN", (int)BT_PAN_BUILD_TAG},
+	{{0, 0, 0, 0}, NULL, (int)"Speed test", LGP_NULL},
+	{{0, 0, 0, 0}, NULL, (int)"Ping", LGP_NULL},
+	{{0, 0, 0, 0}, NULL, (int)"Choose PC", LGP_NULL},
+};
+static const int softkeys[] = {SET_LEFT_SOFTKEY, SET_RIGHT_SOFTKEY, SET_MIDDLE_SOFTKEY};
+static const SOFTKEY_DESC softkeys_d[] = {
+	{0x0018, 0x0000, (int)""},
+	{0x0001, 0x0000, (int)"Back"},
+	{0x003D, 0x0000, (int)LGP_DOIT_PIC}
+};
+static const SOFTKEYSTAB softkeys_tab = {softkeys_d, 0};
+
+static int MainKey(GUI *gui, GUI_MSG *msg);
+static int SubKey(GUI *gui, GUI_MSG *msg);
+static const MENU_DESC menu_d[SCR_N] = {
+	{8, MainKey, Hook, NULL, softkeys, &softkeys_tab, MENU_FLAGS_ENABLE_TEXT_SCROLLING, MainItem, NULL, NULL, 0},
+	{8, SubKey, Hook, NULL, softkeys, &softkeys_tab, MENU_FLAGS_ENABLE_TEXT_SCROLLING, TestItem, NULL, NULL, 0},
+	{8, SubKey, Hook, NULL, softkeys, &softkeys_tab, MENU_FLAGS_ENABLE_TEXT_SCROLLING, PingItem, NULL, NULL, 0},
+	{8, SubKey, Hook, NULL, softkeys, &softkeys_tab, MENU_FLAGS_ENABLE_TEXT_SCROLLING, PickItem, NULL, NULL, 0},
+};
+
+/* Only from a key handler of our menus or our CSM's oncreate: CreateMenu attaches the GUI to the
+ * CSM whose message is being processed (s65-player: from a foreign timer -> MMI data abort). */
+static void Open(int s) {
+	HEADER_DESC *h = &hdr[s];
+	if (scr[s].id) return;
+#ifdef SGOLD
+	h->rc.x = 0; h->rc.y = YDISP; h->rc.x2 = ScreenW() - 1; h->rc.y2 = YDISP + HeaderH();
+#else
+	memcpy(&h->rc, GetHeaderRECT(), sizeof(RECT));
+#endif
+	scr[s].n = Rows(s, scr[s].row);
+	Sig(s, &scr[s].sig_state, &scr[s].sig_live);
+	scr[s].left = NULL;
+	ui_opening = s;
+	scr[s].id = CreateMenu(0, 0, &menu_d[s], h, 0, scr[s].n, s == SCR_MAIN ? main_csm : NULL, NULL);
+	ui_opening = -1;
 }
-static void gui_onfocus(GUI *data, malloc_func_t alloc, mfree_func_t free_fn) {
-	(void)alloc; (void)free_fn;
-	data->state = CSM_GUI_STATE_FOCUSED; gui_focused = 1; ui_redraw = 1;
-}
-static void gui_onunfocus(GUI *data, mfree_func_t free_fn) {
-	(void)free_fn;
-	data->state = CSM_GUI_STATE_UNFOCUSED; gui_focused = 0;
-}
-static void gui_onclose(GUI *data, mfree_func_t free_fn) {
-	(void)free_fn;
-	data->state = CSM_GUI_STATE_CLOSED; FreeWS(((MAIN_GUI *)data)->ws); ws = NULL; gui_focused = 0;
-}
-static int gui_method8(void) { return 0; }
-static int gui_method9(void) { return 0; }
+
+/* ------------------------------------------------------------------------- actions */
 
 static void PickerOpen(void) {
-	ui_picker = 1;
-	picker_row = picker_top = 0;
 	peer_count = 0;
 	peers_busy = true; /* until the BTPAN process answers */
 	GBS_SendMessage(BT_PANU_PROCESS_CEPID, BT_PANU_MESSAGE_PEERS_START, 0, 0, 0);
-}
-static void PickerClose(void) {
-	ui_picker = 0;
-	GBS_SendMessage(BT_PANU_PROCESS_CEPID, BT_PANU_MESSAGE_PEERS_STOP, 0, 0, 0);
+	if (scr[SCR_PICK].id) Sync(SCR_PICK);
+	else Open(SCR_PICK);
 }
 
 static void TestToggle(int which) {
@@ -562,7 +527,8 @@ static void TestToggle(int which) {
 			speedtest_stack_cancel();
 		return;
 	}
-	if (!Online() || speedtest_running()) return;
+	if (!Online()) { ShowMSG(1, (int)"Connect first"); return; }
+	if (speedtest_running()) return;
 	if (which == SPEEDTEST_DIRECT) {
 		speedtest[which].state = SPT_RUN; /* shown at once; the BTPAN process starts it */
 		speedtest[which].progress = 0;
@@ -573,86 +539,96 @@ static void TestToggle(int which) {
 	}
 }
 
-static void LinkAction(void) {
-	if (ui_row[0] == 3) return; /* details: nothing to press */
-	if (ui_row[0] == 2) {
-		set_auto_reconnect(!auto_reconnect);
+static void PingAction(int r) {
+	if (r == P_SIZE) {
+		if (!ping_stats.running) ping_size_i = (ping_size_i + 1) % (int)(sizeof(ping_sizes) / sizeof(ping_sizes[0]));
 		return;
 	}
-	if (ui_row[0] == 1) {
-		if (!pan_running) PickerOpen();
-		return;
-	}
+	if (r != P_BTN) return;
+	if (ping_stats.running) {
+		GBS_SendMessage(BT_PANU_PROCESS_CEPID, BT_PANU_MESSAGE_PING_STOP, 0, 0, 0);
+		ping_stats.running = 0; /* shown at once */
+	} else if (Online()) {
+		ping_stats.running = 1; /* shown at once; the BTPAN process starts it */
+		ping_stats.error = NULL;
+		GBS_SendMessage(BT_PANU_PROCESS_CEPID, BT_PANU_MESSAGE_PING_START, 0, (void *)PingSize(), 0);
+	} else ShowMSG(1, (int)"Connect first");
+}
+
+static void ConnectToggle(void) {
 	if (Busy()) return;
 	if (pan_running) {
 		speedtest_stack_cancel();
 		AppStopPan();
+	} else if (ui_patch == PATCH_OLD) {
+		ShowMSG(1, (int)"Undo the old hook patch and install the new one");
 	} else if (addr_ok) {
 		bt_pan_rx_bytes = bt_pan_tx_bytes = 0;
+		rate_last_rx = rate_last_tx = 0;
+		rate_rx = rate_tx = 0;
 		AppStartPan();
 	} else {
-		ui_row[0] = 1;
 		PickerOpen();
 	}
 }
 
-static int gui_onkey(GUI *data, GUI_MSG *msg) {
-	int key = msg->gbsmsg->submess, type = msg->gbsmsg->msg;
-	(void)data;
-	if (type != KEY_DOWN && type != LONG_PRESS) return 0;
-	if (ui_picker) {
-		if (key == RIGHT_SOFT || key == RED_BUTTON) PickerClose();
-		else if (key == UP_BUTTON) { if (picker_row > 0) --picker_row; }
-		else if (key == DOWN_BUTTON) { if (picker_row + 1 < peer_count) ++picker_row; }
-		else if (key == LEFT_SOFT || key == ENTER_BUTTON) {
-			if (!peer_count) { if (!peers_busy) PickerOpen(); }
-			else if (picker_row < peer_count) {
-				save_peer_addr(peers[picker_row].mac, peers[picker_row].name);
-				PickerClose();
-			}
-		}
-		ui_redraw = 1;
-		return 0;
+/* menu onkey: 0 = default (cursor), -1 = handled, 1 = close the menu */
+static int MainKey(GUI *gui, GUI_MSG *msg) {
+	int a = MenuAct(msg);
+	if (a == RED_BUTTON) { AppMinimize(); return -1; }
+	if (a == 'B') { AppExit(); return -1; }
+	if (a == GREEN_BUTTON) { ConnectToggle(); Sync(SCR_MAIN); return -1; }
+	if (a != 'S') return 0;
+	switch (RowAt(SCR_MAIN, GetCurMenuItem(gui))) {
+		case M_CONNECT: ConnectToggle(); break;
+		case M_PC:
+			if (pan_running) ShowMSG(1, (int)"Disconnect first");
+			else PickerOpen();
+			return -1;
+		case M_AUTO: set_auto_reconnect(!auto_reconnect); break;
+		case M_TEST: Open(SCR_TEST); return -1;
+		case M_PING: Open(SCR_PING); return -1;
+		case M_MIN: AppMinimize(); return -1;
+		case M_EXIT: AppExit(); return -1;
+		default: return -1;
 	}
-	if (type != KEY_DOWN) return 0;
-	if (key == RED_BUTTON) AppMinimize();   /* "Exit" (right soft) leaves */
-	else if (key == RIGHT_SOFT) AppExit();
-	else if (key == LEFT_BUTTON || key == RIGHT_BUTTON)
-		ui_tab = (ui_tab + (key == RIGHT_BUTTON ? 1 : UI_TABS - 1)) % UI_TABS;
-	else if (key >= '1' && key < '1' + UI_TABS) ui_tab = key - '1';
-	else if (key == UP_BUTTON || key == DOWN_BUTTON) {
-		int rows = ui_tab == 0 ? LINK_ROWS : ui_tab == 1 ? 2 : PING_ROWS;
-		ui_row[ui_tab] = (ui_row[ui_tab] + (key == DOWN_BUTTON ? 1 : rows - 1)) % rows;
-	}
-	else if (key == LEFT_SOFT || key == ENTER_BUTTON || key == GREEN_BUTTON) {
-		if (ui_tab == 0) LinkAction(); else if (ui_tab == 1) TestToggle(ui_row[1]); else PingAction();
-	}
-	ui_redraw = 1;
-	return 0;
+	Sync(SCR_MAIN);
+	return -1;
 }
 
-static GUI_METHODS gui_methods = {
-	gui_onredraw, gui_oncreate, gui_onclose, gui_onfocus, gui_onunfocus, gui_onkey,
-	NULL, kill_data, gui_method8, gui_method9, NULL
-};
-
-static void UiShow(void) {
-	if (!main_csm) return;
-	if (!main_csm->gui_id) {
-		MAIN_GUI *gui = malloc(sizeof(*gui));
-		if (!gui) return;
-		zeromem(gui, sizeof(*gui));
-		StoreXYWHtoRECT(&gui_rect, 0, YDISP, ScreenW(), ScreenH() - YDISP);
-		gui->base.canvas = &gui_rect;
-		gui->base.methods = &gui_methods;
-		gui->base.item_ll.data_mfree = mfree_adr();
-		main_csm->gui_id = CreateGUI(gui);
+static int SubKey(GUI *gui, GUI_MSG *msg) {
+	int s = ScreenOf(gui), a = MenuAct(msg), item = GetCurMenuItem(gui), r = RowAt(s, item);
+	if (a == RED_BUTTON) { AppMinimize(); return -1; }
+	if (a == 'B') {
+		if (s == SCR_PICK) GBS_SendMessage(BT_PANU_PROCESS_CEPID, BT_PANU_MESSAGE_PEERS_STOP, 0, 0, 0);
+		scr[s].id = 0;
+		return 1;
 	}
-	ui_redraw = 1;
+	if (a != 'S') return 0;
+	if (s == SCR_TEST) {
+		if (r == T_BTN0 || r == T_BTN1) TestToggle(r == T_BTN1);
+	} else if (s == SCR_PING) {
+		PingAction(r);
+	} else if (!peer_count) {
+		if (!peers_busy) PickerOpen();
+		return -1;
+	} else if (item < peer_count) {
+		save_peer_addr(peers[item].mac, peers[item].name);
+		GBS_SendMessage(BT_PANU_PROCESS_CEPID, BT_PANU_MESSAGE_PEERS_STOP, 0, 0, 0);
+		scr[s].id = 0;
+		return 1;
+	}
+	Sync(s);
+	return -1;
 }
+
+/* ------------------------------------------------------------------------- CSM */
 
 static void UiClose(void) {
-	if (main_csm && main_csm->gui_id) GeneralFunc_flag1(main_csm->gui_id, 1);
+	int s;
+	for (s = SCR_N - 1; s > SCR_MAIN; --s)
+		if (scr[s].id) { GeneralFunc_flag1(scr[s].id, 1); scr[s].id = 0; }
+	if (main_csm && scr[SCR_MAIN].id) GeneralFunc_flag1(scr[SCR_MAIN].id, 1);
 	else if (main_csm) main_csm->csm.state = CSM_STATE_CLOSED;
 }
 
@@ -664,17 +640,45 @@ static void AppExit(void) {
 	UiClose();
 }
 
+/* Fast polling only while one of our screens is on top and something is changing on its own
+ * (connecting, disconnecting, reconnect wait, PC list, speed test); otherwise once a second:
+ * connected and idle, minimized or covered = one MMI timer a second. */
+static bool UiFast(void) {
+	int s, top = 0;
+	for (s = 0; s < SCR_N; ++s)
+		if (scr[s].id && IsGuiOnTop(scr[s].id)) top = 1;
+	if (!top) return false;
+	return Busy() || reconnect_wait || (pan_running && !Online()) || peers_busy || speedtest_running() ||
+		   ui_exit_requested;
+}
+
+static void UiPoll(GBSTMR *timer);
+
+static void UiArm(unsigned ticks) {
+	if (IsTimerProc(&ui_timer)) GBS_StopTimer(&ui_timer);
+	ui_interval = ticks;
+	GBS_StartTimerProc(&ui_timer, ticks, UiPoll);
+}
+
+/* after a key action: a transition just began, follow it at the fast rate */
+static void UiKick(void) {
+	if (!ui_in_poll && main_csm && ui_interval != UI_POLL_FAST && UiFast()) UiArm(UI_POLL_FAST);
+}
+
+/* MMI timer: only compares numbers; texts are made by the firmware's redraw of the menu on top,
+ * and only after a change. */
 static void UiPoll(GBSTMR *timer) {
-	unsigned sig;
+	int s, live_due;
 	(void)timer;
 	++ui_polls;
+	ui_ticks += ui_interval;
+	live_due = ui_ticks - ui_live_at >= UI_LIVE_TICKS;
 #if BT_PAN_TRACE
 	{ /* each ~1 s from MMI: where our code was last (see trace.h) */
 		static unsigned lines, last_seq = ~0u, same;
 		char t[96];
 
-		if (ui_polls % (216u / UI_POLL_TICKS ? 216u / UI_POLL_TICKS : 1u) == 0 && lines < 500 &&
-			(trace_where_seq != last_seq || ++same % 5 == 0)) {
+		if (live_due && lines < 500 && (trace_where_seq != last_seq || ++same % 5 == 0)) {
 			++lines;
 			sprintf(t, "W %u seq=%u %s %X in %X", ui_polls, trace_where_seq, trace_where,
 					trace_where_arg, trace_where_cepid);
@@ -685,12 +689,25 @@ static void UiPoll(GBSTMR *timer) {
 #endif
 	if (ui_exit_requested) { ui_exit_requested = false; UiClose(); return; }
 	if (!pan_running && speedtest[SPEEDTEST_STACK].state == SPT_RUN) speedtest_stack_cancel();
-	sig = UiSig();
-	if (sig != ui_state_sig) { ui_state_sig = sig; ui_redraw = 1; }
-	if (ui_redraw && gui_focused && (unsigned)(ui_polls - ui_last_redraw) >= UI_REDRAW_MIN) {
-		ui_redraw = 0; ui_last_redraw = ui_polls; REDRAW();
+	if (live_due) {
+		uint32_t rx = bt_pan_rx_bytes, tx = bt_pan_tx_bytes;
+		unsigned dt = ui_ticks - ui_live_at;
+		rate_rx = rx >= rate_last_rx ? (unsigned)((uint64_t)(rx - rate_last_rx) * 216u / dt) : 0;
+		rate_tx = tx >= rate_last_tx ? (unsigned)((uint64_t)(tx - rate_last_tx) * 216u / dt) : 0;
+		rate_last_rx = rx;
+		rate_last_tx = tx;
+		ui_live_at = ui_ticks;
 	}
-	GBS_StartTimerProc(&ui_timer, UI_POLL_TICKS, UiPoll);
+	ui_in_poll = true;
+	for (s = 0; s < SCR_N; ++s) {
+		unsigned st, live;
+		if (!scr[s].id || !IsGuiOnTop(scr[s].id)) continue; /* hidden: nothing to do */
+		Sig(s, &st, &live);
+		if (st != scr[s].sig_state || (live != scr[s].sig_live && live_due))
+			Sync(s);
+	}
+	ui_in_poll = false;
+	UiArm(UiFast() ? UI_POLL_FAST : UI_POLL_SLOW);
 }
 
 static void maincsm_oncreate(CSM_RAM *data) {
@@ -698,16 +715,25 @@ static void maincsm_oncreate(CSM_RAM *data) {
 	trace("C csm oncreate");
 	main_csm = csm;
 	csm->csm.state = CSM_STATE_OPEN;
-	csm->gui_id = 0;
-	UiShow();
-	GBS_StartTimerProc(&ui_timer, UI_POLL_TICKS, UiPoll);
+	csm->csm.unk1 = 0;
+	ui_tmp = AllocWS(64);
+	ui_patch = hooks_patch_state();
+	zeromem(scr, sizeof(scr));
+	Open(SCR_MAIN);
+	csm->gui_id = scr[SCR_MAIN].id;
+	ui_ticks = ui_live_at = 0;
+	UiArm(UI_POLL_FAST);
+	prof_start(); /* SG trace builds: CPU per process (prof.h) */
 	trace("C csm open");
 }
 
 static void maincsm_onclose(CSM_RAM *data) {
 	(void)data;
+	prof_stop();
 	if (IsTimerProc(&ui_timer)) GBS_StopTimer(&ui_timer);
 	main_csm = NULL;
+	zeromem(scr, sizeof(scr));
+	if (ui_tmp) { FreeWS(ui_tmp); ui_tmp = NULL; }
 	speedtest_stack_cancel();
 	/* Closed from outside while PAN runs: our SDev app is still in the stack's table, so the
 	 * elf must not unload yet. Stop like the headless build: finish_poc kills the BTA process
@@ -818,13 +844,18 @@ static int maincsm_onmessage(CSM_RAM *data, GBS_MSG *msg) {
 		csm_to_top(csm->csm.id);
 		return 1;
 	}
-	if (msg->msg == MSG_GUI_DESTROYED && (int)msg->data0 == csm->gui_id) {
-		csm->gui_id = 0;
-		csm->csm.state = CSM_STATE_CLOSED;
+	if (msg->msg == MSG_GUI_DESTROYED) {
+		int s;
+		for (s = SCR_MAIN + 1; s < SCR_N; ++s)
+			if ((int)msg->data0 == scr[s].id) scr[s].id = 0;
+		if ((int)msg->data0 == csm->gui_id) {
+			csm->gui_id = scr[SCR_MAIN].id = 0;
+			csm->csm.state = CSM_STATE_CLOSED;
+		}
 	}
 	if (msg->msg == MSG_RECONFIGURE_REQ && msg->data0 && !strcmpi(msg->data0, cfg_path)) {
 		config_load(); /* edited in the BCFG editor; a running link keeps its address */
-		ui_redraw = 1;
+		Sync(SCR_MAIN);
 	}
 	speedtest_stack_msg(msg);
 	return 1;
