@@ -499,7 +499,7 @@
 0888: 0xA06252E0   ; 222: SetCpuClockTempHi(2)
 088C: 0xA06A1ECC   ; 223: IsMediaPlayerInBackground
 0890: 0xA06A33B8   ; 224: CloseMediaPlayer
-0894: 0xA059ABB8   ; 225: int PlayMelody_ChangeVolume(int handle,int volume)
+0894: 0xA059ABB8   ; 225: int PlayMelody_ChangeVolume(int handle, PLAY_VOLUME volume)
 0898: 0xA059B668   ; 226: int PlayMelody_StopPlayback(int handle)
 089C: 0xA059B708   ; 227: int PlayMelody_PausePlayback(int handle)
 08A0: 0xA059B738   ; 228: int PlayMelody_ResumePlayBack(int handle)
@@ -990,5 +990,14 @@
 1328: 0xA8EBC254   ; 84CA: void *RamJSApiConnections(void)
 132C: 0xA8DA5500   ; 84CB: void *RamBtlpConnections(void)
 1330: 0xA8DA2080   ; 84CC: void *RamL2capChannelState(void)
+1384: 0xA00942AF   ; 4E1: void *GBS_CreateMsg(void **msg, int cepid_to, int msg_id, int size)
+1388: 0xA0094481   ; 4E2: void GBS_PostMsg(void **msg)
+138C: 0xA056D454   ; 4E3: void *FS_MemAlloc(int size)
+1390: 0xA059AC60   ; 4E4: int PlayMelody_GetVolume(int handle, PLAY_VOLUME *volume)
+1394: 0xA0D1F160   ; 4E5: void *Obs_MemAlloc(int size)
+1398: 0xA0D1F190   ; 4E6: void Obs_MemFree(void *ptr)
+139C: 0xA8F5C300   ; 84E7: void **RamObsFileStreamMethods(void)
+13A0: 0xA8D9B2C4   ; 84E8: void *RamFsDrivers(void)
+13A4: 0xA8D9B24C   ; 84E9: void *RamFsDrives(void)
 #pragma disable old_equal_ff
 +0

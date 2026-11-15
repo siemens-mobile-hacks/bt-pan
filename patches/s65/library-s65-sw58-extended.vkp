@@ -873,5 +873,8 @@
 1378: 0xA08E383B   ; 4DE: const uint8_t *CA_LocalAddr(uint16_t local_dev)
 137C: 0xA1333517   ; 4DF: unsigned LMAN_GetRegSlot(unsigned cepid)
 1380: 0xA13337E7   ; 4E0: int LMAN_FillReg(unsigned reg_index, const REGSOCKCEPID_DATA *reg, int on)
+1394: 0xA097B868   ; 4E5: void *Obs_MemAlloc(int size)
+1398: 0xA097B874   ; 4E6: void Obs_MemFree(void *ptr)
+139C: 0xA87E4D64   ; 84E7: void **RamObsFileStreamMethods(void)
 #pragma disable old_equal_ff
 +0
