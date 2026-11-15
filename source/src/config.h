@@ -95,8 +95,19 @@ extern unsigned bt_pan_tx_max;
 #define BT_PAN_SG_IP_MTU 320u
 /* bt-pan-mtu_S65v58.vkp installed (bt_sg_mtu_patched): main.c switches to 1691 / IP 1500 */
 #define BT_PAN_SG_BIG_IP_MTU 1500u
-/* told to ENIP with the patch, like EL71's BT_PAN_MTU: a bigger TCP receive window for Java */
+/* told to ENIP with the patch. It does not change the TCP window: ENIP clamps the driver MTU to
+ * 2209 (MSS 2169, window 3 * MSS = 6507, src/sg_tcpwin.h); real packets stay <= 1500. */
 #define BT_PAN_SG_BIG_STACK_MTU 3000u
+/* D136: receive window of TCP sockets through bt-pan (stock 6507, see src/sg_tcpwin.h) and the
+ * byte limit of ENIP RX pool 4 (stock 10000; pool 6 stays 5000) while the netif runs. 18000 of
+ * data = 13 segments of 1460 = ~18.6 KB of pool bytes, fits pools 4+6 = 25000 with room for a
+ * retransmission next to out-of-order segments (the D97 stall). Packets live in ENIP1/ENIP2_HEAP
+ * (2 x 16324 bytes, big packets leave 1500 of ENIP2 for small ones): 25000 of pool bytes take
+ * ~27 KB of them at most. */
+#define BT_PAN_SG_TCP_WINDOW 18000u
+#define BT_PAN_SG_RX_POOL 4u
+#define BT_PAN_SG_RX_POOL_STOCK 10000u
+#define BT_PAN_SG_RX_POOL_LIMIT 20000u
 #else
 #define BT_PANU_RX_MTU BT_BNEP_MIN_MTU
 

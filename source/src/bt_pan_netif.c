@@ -16,6 +16,7 @@
 #include "lib.h"
 #ifdef SGOLD
 #include "bt_sg.h"
+#include "sg_tcpwin.h"
 #endif
 
 #define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
@@ -77,6 +78,71 @@ static void bt_pan_netif_down(ENIP_MODULE *module) {
 
 volatile uint32_t bt_pan_rx_bytes, bt_pan_tx_bytes; /* IPv4 bytes, for the UI */
 
+#ifdef SGOLD
+/* ENIP RAM (read by ENIP_PacketAlloc S65 A1335022 / SK65 A09ED21E, init S65 A1334F34 from the
+ * flash table A13C9164 / A0B4613C): bytes in use u32[8], limits u16[8] right after, the starving
+ * pool u8 at used-4 (fail count u16 at used-2). TCP socket table: see sg_tcpwin.h. 0 = unknown firmware. */
+static volatile uint32_t *bt_pan_sg_pool_used(void) {
+	switch (bt_sg_fw()) {
+	case SG_FW_S65V58: return (volatile uint32_t *)0xA876E4DCu;
+	case SG_FW_SK65V50: return (volatile uint32_t *)0xA8F17D90u;
+	default: return NULL;
+	}
+}
+
+static volatile uint16_t *bt_pan_sg_pool_limits(void) {
+	volatile uint32_t *used = bt_pan_sg_pool_used();
+
+	return used ? (volatile uint16_t *)(used + 8) : NULL;
+}
+
+static volatile uint8_t *bt_pan_sg_pool_starve(void) {
+	switch (bt_sg_fw()) {
+	case SG_FW_S65V58: return (volatile uint8_t *)0xA876E4D8u;
+	case SG_FW_SK65V50: return (volatile uint8_t *)0xA8F17D8Cu;
+	default: return NULL;
+	}
+}
+
+static uint8_t *const *bt_pan_sg_socks(void) {
+	switch (bt_sg_fw()) {
+	case SG_FW_S65V58: return (uint8_t *const *)(0xA876D5A0u + 0x45Cu);
+	case SG_FW_SK65V50: return (uint8_t *const *)(0xA8F16E54u + 0x45Cu);
+	default: return NULL;
+	}
+}
+
+static void bt_pan_sg_rx_limit(unsigned from, unsigned to) {
+	volatile uint16_t *limits = bt_pan_sg_pool_limits();
+
+	if (limits && limits[BT_PAN_SG_RX_POOL] == from)
+		limits[BT_PAN_SG_RX_POOL] = (uint16_t)to;
+}
+
+/* every packet we send (ENIP process): raise the window of a TCP socket on its SYN */
+static void bt_pan_sg_tcp_window(const uint8_t *packet, size_t length) {
+	uint8_t *sock;
+
+	if (length < 40u || packet[9] != 6u)
+		return;
+	LockSched();
+	sock = sg_tcp_window_raise(bt_pan_sg_socks(), packet, length, BT_PAN_SG_TCP_WINDOW);
+	UnlockSched();
+#if BT_PAN_TRACE
+	if (sock) {
+		static char line[64];
+
+		sprintf(line, "WIN sock %08lX mss %u: %u -> %u", (unsigned long)(uintptr_t)sock,
+				(unsigned)*(uint16_t *)(sock + SG_SOCK_MSS),
+				3u * *(uint16_t *)(sock + SG_SOCK_MSS), BT_PAN_SG_TCP_WINDOW);
+		trace(line);
+	}
+#else
+	(void)sock;
+#endif
+}
+#endif
+
 #if BT_PAN_TRACE
 struct trace_pkt trace_pkts[TRACE_PKT_N];
 volatile unsigned trace_pkt_n;
@@ -86,8 +152,8 @@ volatile unsigned trace_pkt_n;
  * failed-allocation count u16 A876E4DA. Read only. */
 unsigned trace_pool_used(unsigned pool) {
 #ifdef SGOLD
-	if (bt_sg_fw() == SG_FW_S65V58 && pool <= 7)
-		return ((volatile uint32_t *)0xA876E4DCu)[pool];
+	if (bt_pan_sg_pool_used() && pool <= 7)
+		return bt_pan_sg_pool_used()[pool];
 #else
 	/* EL71 sw45: ENIP_PacketAlloc A097B468 (library 46A), used u32[] at A8E9EC98, limits at +BC */
 	if (LIB_ENTRY(0x46A) == 0xA097B469u && pool <= 7)
@@ -318,6 +384,9 @@ static void bt_pan_netif_send_ipv4(struct bt_pan_netif *netif, const uint8_t *pa
 		return;
 	}
 	bt_pan_tx_bytes += length;
+#ifdef SGOLD
+	bt_pan_sg_tcp_window(packet, length);
+#endif
 
 	/* our TCP SYNs: the window and MSS the phone's stack offers (see BT_PAN_MTU) */
 	if (length >= 40 && packet[9] == 6) {
@@ -473,7 +542,9 @@ int bt_pan_netif_start(struct bt_pan_netif *netif) {
 	}
 
 	lman_connection_attach_IF(netif->lman_connection, netif->config.iface_index, 0xffffu);
-#ifndef SGOLD
+#ifdef SGOLD
+	bt_pan_sg_rx_limit(BT_PAN_SG_RX_POOL_STOCK, BT_PAN_SG_RX_POOL_LIMIT);
+#else
 	bt_pan_el71_rx_limits(BT_PAN_EL71_RX_STOCK, BT_PAN_EL71_RX_LIMIT);
 #endif
 	return 0;
@@ -491,8 +562,25 @@ static int bt_pan_netif_input(struct bt_pan_netif *netif, const uint8_t *packet,
 		enip_packet = enip_packet_allocate(&netif->module, (int)(length + BT_PAN_NETIF_RX_EXTRA),
 										  bt_pan_rx_pools[i].pool, BT_PAN_NETIF_RX_OFFSET,
 										  bt_pan_rx_pools[i].quota);
-	if (!enip_packet)
+	if (!enip_packet) {
+#ifdef SGOLD
+		/* a failed allocation leaves "starving pool" = ours, which blocks every other pool's
+		 * packets >= 100 bytes (app data, TCP segments) until ours gets one again. Native PPP
+		 * waits for the free; we drop the packet and do not wait, so release the claim. */
+		volatile uint8_t *starve = bt_pan_sg_pool_starve();
+
+		if (starve) {
+			LockSched();
+			for (i = 0; i < sizeof(bt_pan_rx_pools) / sizeof(bt_pan_rx_pools[0]); ++i)
+				if (*starve == bt_pan_rx_pools[i].pool) {
+					*starve = 0;
+					break;
+				}
+			UnlockSched();
+		}
+#endif
 		return -2;
+	}
 
 	enip_packet->data = (uint8_t *)enip_packet->data - BT_PAN_NETIF_RX_HEADROOM;
 	memcpy(enip_packet->data, packet, length);
@@ -769,7 +857,10 @@ void bt_pan_netif_stop(struct bt_pan_netif *netif) {
 	}
 
 	pan_lman_down(); /* apps' contexts point at this driver */
-#ifndef SGOLD
+#ifdef SGOLD
+	if (netif->registered)
+		bt_pan_sg_rx_limit(BT_PAN_SG_RX_POOL_LIMIT, BT_PAN_SG_RX_POOL_STOCK);
+#else
 	if (netif->registered)
 		bt_pan_el71_rx_limits(BT_PAN_EL71_RX_LIMIT, BT_PAN_EL71_RX_STOCK);
 #endif
