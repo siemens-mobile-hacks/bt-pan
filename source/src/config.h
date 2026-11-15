@@ -69,14 +69,18 @@ extern unsigned bt_pan_tx_max;
 /* 1 = log every IPv4 packet (slow: each line holds the USART ~5 ms) */
 #define BT_PAN_LOG_PACKETS 0
 #define BT_PAN_IFACE_INDEX 1
-/* MTU told to the phone's stack. ENIP seems to size a TCP socket's receive window as 2*MTU
- * (window 3000 seen with 1500), which caps Java/Opera that read slowly; D24+ try 3000. Real
- * packets stay <= 1500: the PC's MSS limits TCP, and send_ipv4 drops anything bigger. */
+/* MTU told to the phone's stack. The TCP receive window does NOT depend on it (D24-D128 used
+ * 3000 on the guess "window = 2*MTU"; EL71 window = 0.9 * socket RX account - 1500, see
+ * bt_pan_netif.c). The MTU sets the MSS ENIP offers (MTU - 40), and ENIP advertises a zero window
+ * while its window is below that MSS (A0A67FFA): MSS 2960 turned every partly filled 3000 window
+ * into 0. Real packets stay <= 1500 (send_ipv4 drops anything bigger), so 1500 from D129. */
 #ifdef SGOLD
 #define BT_PAN_MTU BT_PAN_SG_IP_MTU
 #else
-#define BT_PAN_MTU 3000u
+#define BT_PAN_MTU 1500u
 #endif
+/* EL71: TCP RX account limit for normal sockets (stock 5000 -> window 3000); 12000 -> 9300 */
+#define BT_PAN_EL71_RX_LIMIT 12000u
 
 /* Keep the connection alive long enough to test from the host. 1 hour. */
 #define BT_PANU_RUN_SECONDS 3600u

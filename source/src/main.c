@@ -37,12 +37,14 @@
 #define BT_PANU_MESSAGE_DIRECT_STOP 0x6b54u
 #define BT_PANU_MESSAGE_PING_START 0x6b55u /* data0 = payload size; ping runs in this process */
 #define BT_PANU_MESSAGE_PING_STOP 0x6b56u
+#define BT_PANU_MESSAGE_RX 0x6b57u /* SGOLD: the stack callback put data into the ring */
 
 static struct bt_pan_netif netif;
 
 static struct bt_panu_config panu_config = {
 	.owner_cepid = BT_PANU_PROCESS_CEPID,
 	.message_id = BT_PANU_MESSAGE_BTA,
+	.rx_message = BT_PANU_MESSAGE_RX, /* event-driven receive (SGOLD D112, ELKA D113+) */
 	.peer_addr = BT_PANU_HOST_BDADDR,
 	.rx_mtu = BT_PANU_RX_MTU,
 	.tx_mtu = BT_PANU_TX_MTU,
@@ -222,12 +224,19 @@ static void send_ping(GBSTMR *timer) {
 static uint32_t watch_last;
 static unsigned watch_idle, watch_beats;
 
+/* pan_lman_poll (BTPAN, 1 s) and rx_watch: the receive poll must keep running */
+void bt_pan_rx_guard(void) {
+	if (!shutdown_started && GBS_GetCurCepid() == BT_PANU_PROCESS_CEPID)
+		bt_panu_rx_guard(&panu);
+}
+
 static void rx_watch(GBSTMR *timer) {
 	uint32_t count = bt_panu_rx_count();
 
 	(void)timer;
 	if (shutdown_started || !netif.registered)
 		return;
+	bt_pan_rx_guard();
 	if (count != watch_last) {
 		if (watch_idle >= 4)
 			bt_panu_rx_report(&panu, "RX watchdog: receive is back\r\n");
@@ -286,6 +295,7 @@ static void pan_stopped(void);
 
 #if BT_PAN_TRACE
 const char *volatile trace_where = "start";
+const unsigned trace_btpan_cepid = BT_PANU_PROCESS_CEPID;
 volatile unsigned trace_where_arg, trace_where_cepid, trace_where_seq;
 #endif
 
@@ -306,6 +316,10 @@ static void process_messages_(void) {
 		if (traced < 40) trace("P no message");
 		return;
 	}
+	if (GBS_MSG_ID(msg.msg) == GBS_MSG_ID(BT_PANU_MESSAGE_RX)) {
+		bt_panu_rx_event(&panu); /* the hot path: no logging */
+		return;
+	}
 #if BT_PAN_TRACE
 	if (traced < 40) {
 		char t[48];
@@ -315,10 +329,12 @@ static void process_messages_(void) {
 	}
 #endif
 
-	sprintf(log_buf, "GBS: from=%04X msg=%08X sub=%08X data0=%p data1=%p\r\n",
-			(unsigned int)msg.pid_from, (unsigned int)msg.msg, (unsigned int)msg.submess, msg.data0,
-			msg.data1);
-	usart_puts(log_buf);
+	if (BT_PAN_USART_LOG) {
+		sprintf(log_buf, "GBS: from=%04X msg=%08X sub=%08X data0=%p data1=%p\r\n",
+				(unsigned int)msg.pid_from, (unsigned int)msg.msg, (unsigned int)msg.submess, msg.data0,
+				msg.data1);
+		usart_puts(log_buf);
+	}
 
 	WHERE("P msg", (unsigned)(uint16_t)msg.msg);
 	switch (GBS_MSG_ID(msg.msg)) {
@@ -381,8 +397,11 @@ static int create_process(void) {
 	 * DNS answer, so the answer that BTPAN receives never arrived (D85). Between MMI and Java. */
 	static PGROUP group = {BT_PANU_PROCESS_GROUP, 0x60, 0x4000, 2};
 #else
+#ifndef BT_PAN_ELKA_PRIO
+#define BT_PAN_ELKA_PRIO 0x80
+#endif
 	static PGROUP group = {
-		BT_PANU_PROCESS_GROUP, "T_BTPAN", 0x80, 0x4000, 2,
+		BT_PANU_PROCESS_GROUP, "T_BTPAN", BT_PAN_ELKA_PRIO, 0x4000, 2,
 	};
 #endif
 

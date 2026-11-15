@@ -27,8 +27,10 @@ set(SOURCES
 
 # Builds from one source: ELKA (EL71/E71 sw45) and SG (S65 sw58, #ifdef SGOLD; S65 BT in
 # src/bt_sg.h). SG_LOG = the SG build with the debug log on the cable port (BT_PAN_USART_LOG).
-foreach(NAME ELKA SG SG_LOG SG_TRACE SG_TRACE_LOG)
-	string(REGEX REPLACE "_(LOG|TRACE|TRACE_LOG)$" "" PLATFORM ${NAME})
+# ELKA_TRACE: the same trace on EL71 (4:\\bt-pan-trace.txt); ELKA_P60 / ELKA_TRACE_P60: BTPAN at
+# priority 0x60 (as on S65) instead of 0x80, for an A/B test.
+foreach(NAME ELKA ELKA_TRACE ELKA_P60 ELKA_TRACE_P60 SG SG_LOG SG_TRACE SG_TRACE_LOG)
+	string(REGEX REPLACE "_(LOG|TRACE|TRACE_LOG|P60|TRACE_P60)$" "" PLATFORM ${NAME})
 	add_executable(bt-pan_${NAME} ${SOURCES})
 	target_include_directories(bt-pan_${NAME} PRIVATE src "${CMAKE_CURRENT_BINARY_DIR}")
 	target_sdk_setup(bt-pan_${NAME} ${PLATFORM})
@@ -36,7 +38,10 @@ foreach(NAME ELKA SG SG_LOG SG_TRACE SG_TRACE_LOG)
 	if(NAME MATCHES "_LOG$")
 		target_compile_definitions(bt-pan_${NAME} PRIVATE BT_PAN_USART_LOG=1)
 	endif()
-	if(NAME MATCHES "_TRACE(_LOG)?$") # start-up checkpoints to 0:\\bt-pan-trace.txt (src/trace.h)
+	if(NAME MATCHES "_P60$")
+		target_compile_definitions(bt-pan_${NAME} PRIVATE BT_PAN_ELKA_PRIO=0x60)
+	endif()
+	if(NAME MATCHES "_TRACE(_LOG|_P60)?$") # start-up checkpoints to bt-pan-trace.txt (src/trace.h)
 		target_compile_definitions(bt-pan_${NAME} PRIVATE BT_PAN_TRACE=1)
 	endif()
 	set_target_properties(bt-pan_${NAME} PROPERTIES OUTPUT_NAME "bt-pan_${NAME}")

@@ -259,6 +259,11 @@ static int LinkItems(void) {
 			if (Place(y, fs, -1, &sy)) UiText(buf, 9, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM);
 			y += fs + 3;
 		}
+		/* L2CAP tx/rx MTU (EL71: negotiated; 1691 = the MTU patch works) and the IP packet limit */
+		snprintf(buf, sizeof(buf), "MTU: L2CAP %u/%u, IP %u", (unsigned)panu.neg_tx_mtu,
+				 (unsigned)panu.neg_rx_mtu, bt_pan_netif_tx_max());
+		if (Place(y, fs, -1, &sy)) UiText(buf, 9, sy, w - 10, sy + fs - 1, FONT_SMALL, TEXT_ALIGNLEFT, C_DIM);
+		y += fs + 3;
 	}
 	FmtBytes(num, sizeof(num), bt_pan_rx_bytes);
 	snprintf(buf, sizeof(buf), "Received: %s", num);

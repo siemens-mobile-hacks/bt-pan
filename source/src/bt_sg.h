@@ -77,10 +77,38 @@ static inline int ca_handle_ok(uint16_t h) {
 	return (h & 0xff00u) != 0xff00u;
 }
 
-/* bt-pan-mtu_S65v58.vkp: LDAEstReq accepts MTUs up to 0x6A0 ("movs r7,#0xD4; lsls r7,#3").
- * The one fixed S65v58 address left: it tests for that patch, it calls nothing. */
+/* Which SGOLD firmware this is, told by the library's CA_L2CAP_New (4D6). Only for the few
+ * fixed addresses below, which are read, never called. */
+enum { SG_FW_UNKNOWN, SG_FW_S65V58, SG_FW_SK65V50 };
+
+static inline int bt_sg_fw(void) {
+	switch (LIB_ENTRY(0x4D6)) {
+	case 0xA0902E35u: return SG_FW_S65V58;
+	case 0xA038E7D1u: return SG_FW_SK65V50;
+	default: return SG_FW_UNKNOWN;
+	}
+}
+
+/* bt-pan-mtu_S65v58.vkp / bt-pan-mtu_SK65v50.vkp: LDAEstReq accepts MTUs up to 0x6A0
+ * ("movs r7,#0xD4; lsls r7,#3"); this tests for the patch, it calls nothing. */
 static inline int bt_sg_mtu_patched(void) {
-	return *(const volatile uint32_t *)0xA0B3E2BC == 0x00FF27D4u;
+	uint32_t site;
+
+	switch (bt_sg_fw()) {
+	case SG_FW_S65V58: site = 0xA0B3E2BCu; break;
+	case SG_FW_SK65V50: site = 0xA06F9E94u; break;
+	default: return 0;
+	}
+	return *(const volatile uint32_t *)site == 0x00FF27D4u;
+}
+
+/* trace builds only: the DNS module state (4 query slots of 0x34 at +0x80); 0 = unknown */
+static inline uint32_t bt_sg_dns_state(void) {
+	switch (bt_sg_fw()) {
+	case SG_FW_S65V58: return 0xA876D400u;
+	case SG_FW_SK65V50: return 0xA8F16CB4u;
+	default: return 0;
+	}
 }
 
 static inline const uint8_t *bt_sg_local_addr(void) {

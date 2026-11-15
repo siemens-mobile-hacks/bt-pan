@@ -34,6 +34,8 @@ struct bt_panu_cb {
 struct bt_panu_config {
 	uint16_t owner_cepid;
 	uint32_t message_id;
+	uint32_t rx_message;     /* != 0: the stack callback posts this to owner_cepid on data
+	                          * (call bt_panu_rx_event); 0: 5-tick poll timer (EL71) */
 	uint8_t peer_addr[6];
 	uint16_t rx_mtu;
 	uint16_t tx_mtu;
@@ -57,7 +59,8 @@ struct bt_panu {
 	enum bt_panu_state state;
 	bool app_installed;      /* our SDev app sits in SDEV_APPS[0x05] */
 	uint16_t pool_tx_base;   /* free L2CAP send buffers when the channel opened */
-	uint16_t pool_rx_base;   /* free receive buffers when the channel opened */
+	uint16_t pool_rx_base;
+	uint16_t neg_tx_mtu, neg_rx_mtu; /* ELKA: L2CAP_PARAMETERS_CFM; SGOLD: what we asked for */   /* free receive buffers when the channel opened */
 	unsigned int drain_polls;
 	unsigned int close_polls;
 	bool close_sent;
@@ -81,6 +84,12 @@ int bt_panu_deinit(struct bt_panu *panu);
 unsigned bt_panu_tx_free(void);
 uint32_t bt_panu_rx_count(void);  /* packets the stack handed us so far */
 void bt_panu_rx_report(struct bt_panu *panu, const char *why);
+/* one trace line: receive path counters (stack callback -> ring -> drain, BT pools) */
+void bt_panu_rx_counters(char *buf, unsigned size);
+/* BTPAN only: restart the receive poll if its timer stopped running */
+void bt_panu_rx_guard(struct bt_panu *panu);
+/* owner process, on config.rx_message */
+void bt_panu_rx_event(struct bt_panu *panu);
 void bt_panu_rx_kick(struct bt_panu *panu);
 
 #endif

@@ -13,20 +13,33 @@
 #include "trace.h"
 #include "speedtest.h"
 #include "usart.h"
+#include "lib.h"
+#ifdef SGOLD
+#include "bt_sg.h"
+#endif
 
 #define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 
 #define BT_PAN_NETIF_ACTIVE_FLAGS 0xc0u
 
-/* Values used by the native EL71 link receive path (S65: the same caller, A13358B2, uses
- * pool 6; its packet_allocate has no quota argument, the extra one is ignored). */
-#ifdef SGOLD
-#define BT_PAN_NETIF_RX_POOL 6u
-#else
-#define BT_PAN_NETIF_RX_POOL 5u
-#endif
+/* ENIP receive buffers (ENIP_PacketAlloc). Every pool has a byte limit; the TCP window the stack
+ * offers (6507 seen on S65) is bigger than 3 full packets, and the stack keeps out-of-order
+ * segments in their buffers: with only one 5000-byte pool a lost segment could never be
+ * re-allocated (S65 trace D97: page stuck at ~4 KB). So one common rule: try the entries below
+ * in order. Only the numbers are per platform:
+ *  - SGOLD (S65/SK65): limits u16[8] at flash A13C9164 / B4613C = 6000 8000 8000 8000 10000 6000 5000
+ *    3000; the quota argument is ignored. Pool 4 (10000, native PPP/GPRS receive, idle without a
+ *    SIM) first, the native link pool 6 (5000, caller A13358B2) as the overflow.
+ *  - ELKA (EL71): limits at A0C49574 = 4000 8000 8000 10000 6000 5000 2000; limit = pool limit *
+ *    quota / 100 (A097B468). The native link pool 5 at quota 300 = 15000 for our packets only. */
 #define BT_PAN_NETIF_RX_OFFSET 7
-#define BT_PAN_NETIF_RX_QUOTA 100
+static const struct { uint8_t pool; uint16_t quota; } bt_pan_rx_pools[] = {
+#ifdef SGOLD
+	{4, 100}, {6, 100},
+#else
+	{5, 300},
+#endif
+};
 #define BT_PAN_NETIF_RX_EXTRA 9u
 #define BT_PAN_NETIF_RX_HEADROOM 4u
 
@@ -68,7 +81,166 @@ volatile uint32_t bt_pan_rx_bytes, bt_pan_tx_bytes; /* IPv4 bytes, for the UI */
 struct trace_pkt trace_pkts[TRACE_PKT_N];
 volatile unsigned trace_pkt_n;
 
-void trace_pkt(char dir, const uint8_t *ip, size_t length) {
+/* S65v58 ENIP packet pools (ENIP_PacketAlloc A1335022): bytes in use u32[8] at A876E4DC,
+ * limits u16[8] at A876E4FC (flash A13C9164: pool 6 = 5000), starving pool u8 A876E4D8,
+ * failed-allocation count u16 A876E4DA. Read only. */
+unsigned trace_pool_used(unsigned pool) {
+#ifdef SGOLD
+	if (bt_sg_fw() == SG_FW_S65V58 && pool <= 7)
+		return ((volatile uint32_t *)0xA876E4DCu)[pool];
+#else
+	/* EL71 sw45: ENIP_PacketAlloc A097B468 (library 46A), used u32[] at A8E9EC98, limits at +BC */
+	if (LIB_ENTRY(0x46A) == 0xA097B469u && pool <= 7)
+		return ((volatile uint32_t *)0xA8E9EC98u)[pool];
+#endif
+	(void)pool;
+	return 0;
+}
+
+volatile uint32_t trace_rx_alloc_fails;
+
+/* the pools our receive uses, summed (trace lines) */
+static unsigned trace_rx_pools_used(void) {
+	unsigned i, sum = 0;
+
+	for (i = 0; i < sizeof(bt_pan_rx_pools) / sizeof(bt_pan_rx_pools[0]); ++i)
+		sum += trace_pool_used(bt_pan_rx_pools[i].pool);
+	return sum;
+}
+
+void trace_heartbeat(void) {
+	static unsigned beat, done;
+	static uint32_t last_rx, last_tx;
+	static char tbuf[4096], hb[320];
+	unsigned n = trace_pkt_n, used = 0;
+	uint32_t err, rx = bt_pan_rx_bytes, tx = bt_pan_tx_bytes;
+	int f;
+
+	{ /* file I/O only from BTPAN/MMI (a blocked ENIP crashes socket() callers) */
+		unsigned c = (unsigned)GBS_GetCurCepid();
+		if (c != MMI_CEPID && c != trace_btpan_cepid)
+			return;
+	}
+	trace_flush(); /* lines the hooks left in the RAM ring (ENIP/LMAN/HTTP) */
+	f = sys_open(TRACE_FILE, A_WriteOnly + A_Create + A_Append + A_BIN, P_READ + P_WRITE, &err);
+	if (n - done > TRACE_PKT_N) {
+		if (f >= 0) {
+			sprintf(hb, "LOST %u packet records\r\n", n - done - TRACE_PKT_N);
+			sys_write(f, hb, (int)strlen(hb), &err);
+		}
+		done = n - TRACE_PKT_N; /* overwritten */
+	}
+	if (beat < 3600 && f >= 0) {
+		sprintf(hb, "HB %u t=%08lX rx=%lu (+%lu/s) tx=%lu (+%lu/s) pkts=%u rxpools=%u pools %u %u %u %u %u %u %u %u "
+				"allocfail=%lu\r\n", beat, (unsigned long)*(volatile uint32_t *)0xF4B00010u,
+				(unsigned long)rx, (unsigned long)(rx - last_rx), (unsigned long)tx,
+				(unsigned long)(tx - last_tx), n, trace_rx_pools_used(), trace_pool_used(0),
+				trace_pool_used(1), trace_pool_used(2), trace_pool_used(3), trace_pool_used(4),
+				trace_pool_used(5), trace_pool_used(6), trace_pool_used(7),
+				(unsigned long)trace_rx_alloc_fails);
+		sys_write(f, hb, (int)strlen(hb), &err);
+		bt_panu_rx_counters(hb, sizeof(hb));
+		sys_write(f, hb, (int)strlen(hb), &err);
+	}
+	last_rx = rx;
+	last_tx = tx;
+	++beat;
+	for (; done != n; ++done) {
+		const struct trace_pkt *t = &trace_pkts[done % TRACE_PKT_N];
+		int k;
+
+		if (done >= 60000u || f < 0)
+			continue;
+		k = sprintf(tbuf + used, "%c %08lX %u.%u.%u.%u p%u len %u %u->%u f%02X s%08lX a%08lX w%u r%d pool%u in %X\r\n",
+					t->dir, (unsigned long)t->tick, t->peer[0], t->peer[1], t->peer[2], t->peer[3],
+					t->proto, t->len, t->sport, t->dport, t->flags, (unsigned long)t->seq,
+					(unsigned long)t->ack, t->win, t->res, t->pool, t->cepid);
+		used += (unsigned)k;
+		if (used > sizeof(tbuf) - 160u) {
+			sys_write(f, tbuf, (int)used, &err);
+			used = 0;
+		}
+	}
+	if (f >= 0) {
+		if (used)
+			sys_write(f, tbuf, (int)used, &err);
+		sys_close(f, &err);
+	}
+}
+
+#if !BT_PAN_USART_LOG
+#define TRACE_RING 8192u
+static char trace_ring[TRACE_RING];
+static volatile unsigned trace_ring_head, trace_ring_tail, trace_ring_lost;
+
+static int trace_direct(void) {
+	unsigned c = (unsigned)GBS_GetCurCepid();
+
+	return c == MMI_CEPID || c == trace_btpan_cepid;
+}
+
+static void trace_ring_put(const char *s, unsigned n) {
+	unsigned i;
+
+	if (trace_ring_head - trace_ring_tail + n > TRACE_RING) {
+		++trace_ring_lost;
+		return;
+	}
+	for (i = 0; i < n; ++i)
+		trace_ring[trace_ring_head++ % TRACE_RING] = s[i];
+}
+
+void trace_flush(void) {
+	static char out[512];
+	unsigned n, lost;
+	uint32_t err;
+	int f;
+
+	if (!trace_direct() || (trace_ring_head == trace_ring_tail && !trace_ring_lost))
+		return;
+	f = sys_open(TRACE_FILE, A_WriteOnly + A_Create + A_Append + A_BIN, P_READ + P_WRITE, &err);
+	if (f < 0)
+		return;
+	for (;;) {
+		LockSched();
+		for (n = 0; n < sizeof(out) && trace_ring_tail != trace_ring_head; ++n)
+			out[n] = trace_ring[trace_ring_tail++ % TRACE_RING];
+		UnlockSched();
+		if (!n)
+			break;
+		sys_write(f, out, (int)n, &err);
+	}
+	lost = trace_ring_lost;
+	if (lost) {
+		trace_ring_lost = 0;
+		sprintf(out, "(trace ring: %u lines lost)\r\n", lost);
+		sys_write(f, out, (int)strlen(out), &err);
+	}
+	sys_close(f, &err);
+}
+
+void trace(const char *s) {
+	uint32_t err;
+	int f;
+
+	if (!trace_direct()) {
+		LockSched();
+		trace_ring_put(s, (unsigned)strlen(s));
+		trace_ring_put("\r\n", 2);
+		UnlockSched();
+		return;
+	}
+	trace_flush();
+	f = sys_open(TRACE_FILE, A_WriteOnly + A_Create + A_Append + A_BIN, P_READ + P_WRITE, &err);
+	if (f < 0)
+		return;
+	sys_write(f, s, (int)strlen(s), &err);
+	sys_write(f, "\r\n", 2, &err);
+	sys_close(f, &err);
+}
+#endif
+
+struct trace_pkt *trace_pkt(char dir, const uint8_t *ip, size_t length) {
 	struct trace_pkt *t;
 	unsigned ihl;
 
@@ -79,17 +251,26 @@ void trace_pkt(char dir, const uint8_t *ip, size_t length) {
 	t->dir = dir;
 	t->len = (uint16_t)length;
 	t->cepid = (uint16_t)GBS_GetCurCepid();
+	t->tick = *(volatile uint32_t *)0xF4B00010u; /* STM_TIM0 */
+	t->pool = (uint16_t)trace_rx_pools_used();
 	if (length < 20)
-		return;
+		return t;
 	ihl = (ip[0] & 0x0fu) * 4u;
 	t->proto = ip[9];
 	memcpy(t->peer, ip + (dir == 'R' ? 12 : 16), 4);
 	if ((ip[9] == 6 || ip[9] == 17) && length >= ihl + 4u) {
 		t->sport = (uint16_t)(ip[ihl] << 8 | ip[ihl + 1]);
 		t->dport = (uint16_t)(ip[ihl + 2] << 8 | ip[ihl + 3]);
-		if (ip[9] == 6 && length >= ihl + 14u)
+		if (ip[9] == 6 && length >= ihl + 16u) {
+			t->seq = (uint32_t)ip[ihl + 4] << 24 | (uint32_t)ip[ihl + 5] << 16 |
+					 (uint32_t)ip[ihl + 6] << 8 | ip[ihl + 7];
+			t->ack = (uint32_t)ip[ihl + 8] << 24 | (uint32_t)ip[ihl + 9] << 16 |
+					 (uint32_t)ip[ihl + 10] << 8 | ip[ihl + 11];
 			t->flags = ip[ihl + 13];
+			t->win = (uint16_t)(ip[ihl + 14] << 8 | ip[ihl + 15]);
+		}
 	}
+	return t;
 }
 #endif
 
@@ -219,6 +400,35 @@ static void bt_pan_netif_packet_available(ENIP_MODULE *module) {
 	(void)module;
 }
 
+#ifndef SGOLD
+/* EL71 sw45 TCP receive window. ENIP accounts packet bytes per socket: limits u32[0x2F] at RAM
+ * A8E9ED54, used at A8E9EC98 (init A097B2AC from flash: pools 0-6 = table A0C49574, socket RX
+ * normal 7-0x12 = 5000, TX normal 0x13-0x1E = 5000, RX/TX big 0x1F-0x26 = 20000, drivers 6000).
+ * enip_tcph_sock_init A0A6946C sets the window to 0.9 * (limit - used) - 1500 (A0A6944E), so a
+ * normal socket offers 3000 (S65 offers 6507). socket() hands out a big pair only while one is
+ * free (A097BB2E); A097BD2A does not free a big RX slot closed with unread data, so after a while
+ * every browser socket is normal. Raising the normal RX limits gives new sockets
+ * 0.9 * BT_PAN_EL71_RX_LIMIT - 1500. Only accounting: packets still come from ENIP's heaps. */
+#define BT_PAN_EL71_ACCOUNT_LIMITS ((volatile uint32_t *)0xA8E9ED54u)
+#define BT_PAN_EL71_RX_FIRST 7u
+#define BT_PAN_EL71_RX_END 0x13u
+#define BT_PAN_EL71_RX_STOCK 5000u
+
+static int bt_pan_el71(void) {
+	return LIB_ENTRY(0x46A) == 0xA097B469u;
+}
+
+static void bt_pan_el71_rx_limits(uint32_t from, uint32_t to) {
+	unsigned i;
+
+	if (!bt_pan_el71() || from == to)
+		return;
+	for (i = BT_PAN_EL71_RX_FIRST; i < BT_PAN_EL71_RX_END; ++i)
+		if (BT_PAN_EL71_ACCOUNT_LIMITS[i] == from)
+			BT_PAN_EL71_ACCOUNT_LIMITS[i] = to;
+}
+#endif
+
 void bt_pan_netif_init(struct bt_pan_netif *netif, const struct bt_pan_netif_config *config) {
 	memset(netif, 0, sizeof(*netif));
 	netif->config = *config;
@@ -263,18 +473,24 @@ int bt_pan_netif_start(struct bt_pan_netif *netif) {
 	}
 
 	lman_connection_attach_IF(netif->lman_connection, netif->config.iface_index, 0xffffu);
+#ifndef SGOLD
+	bt_pan_el71_rx_limits(BT_PAN_EL71_RX_STOCK, BT_PAN_EL71_RX_LIMIT);
+#endif
 	return 0;
 }
 
 static int bt_pan_netif_input(struct bt_pan_netif *netif, const uint8_t *packet, size_t length) {
 	ENIP_PKT *enip_packet;
+	unsigned i;
 
 	if (!netif->registered)
 		return -1;
 
-	enip_packet = enip_packet_allocate(&netif->module, (int)(length + BT_PAN_NETIF_RX_EXTRA),
-									  BT_PAN_NETIF_RX_POOL,
-									  BT_PAN_NETIF_RX_OFFSET, BT_PAN_NETIF_RX_QUOTA);
+	enip_packet = NULL;
+	for (i = 0; !enip_packet && i < sizeof(bt_pan_rx_pools) / sizeof(bt_pan_rx_pools[0]); ++i)
+		enip_packet = enip_packet_allocate(&netif->module, (int)(length + BT_PAN_NETIF_RX_EXTRA),
+										  bt_pan_rx_pools[i].pool, BT_PAN_NETIF_RX_OFFSET,
+										  bt_pan_rx_pools[i].quota);
 	if (!enip_packet)
 		return -2;
 
@@ -496,10 +712,18 @@ static void bt_pan_netif_recv(struct bt_panu *panu, const uint8_t *packet, size_
 		if (ping_rx(payload, payload_length))
 			return; /* our ping's echo replies */
 
-		trace_pkt('R', payload, payload_length);
+#if BT_PAN_TRACE
+		struct trace_pkt *tp = trace_pkt('R', payload, payload_length);
+#endif
 		WHERE("enip input", payload_length);
 		result = bt_pan_netif_input(netif, payload, payload_length);
 		WHERE("enip input done", result);
+#if BT_PAN_TRACE
+		tp->res = (int8_t)result;
+		tp->pool = (uint16_t)trace_rx_pools_used(); /* after our allocation */
+		if (result == -2)
+			++trace_rx_alloc_fails;
+#endif
 		if (BT_PAN_LOG_PACKETS || result) {
 			unsigned ihl = (payload[0] & 0x0fu) * 4u, port = 0;
 
@@ -545,6 +769,10 @@ void bt_pan_netif_stop(struct bt_pan_netif *netif) {
 	}
 
 	pan_lman_down(); /* apps' contexts point at this driver */
+#ifndef SGOLD
+	if (netif->registered)
+		bt_pan_el71_rx_limits(BT_PAN_EL71_RX_LIMIT, BT_PAN_EL71_RX_STOCK);
+#endif
 	if (netif->registered) {
 		enip_ip_unregister_driver(&netif->module);
 		enip_module_down(&netif->module, 0);

@@ -47,15 +47,54 @@ static volatile unsigned int sdev_opens, sdev_regs, sdev_closes;
 static volatile int sdev_last_type, sdev_last_app;
 /* receive path counters for the heartbeat line: stack callback -> ring -> our drain */
 static volatile uint32_t rx_calls, rx_refused, rx_bytes_in;
-static uint32_t rx_drained, rx_delivers, rx_polls;
+static uint32_t rx_drained, rx_delivers, rx_polls, rx_restarts;
+static uint32_t rx_drain_ticks, rx_drain_max; /* STM ticks spent draining (trace) */
+#define BTP_STM_TIM0 (*(volatile uint32_t *)0xF4B00010u)
+#define BTP_STM_CLC (*(volatile uint32_t *)0xF4B00000u)
 static volatile uint8_t sdev_last_info[8];
 
 #define POOL_RX_FREE() (bt_pool ? bt_pool[0] : 0)
 #define POOL_TX_FREE() (bt_pool ? bt_pool[1] : 0)
 
+static void ring_write(uint32_t h, const uint8_t *src, uint32_t n) {
+	uint32_t at = h % RX_RING_SIZE, first = RX_RING_SIZE - at;
+
+	if (first > n)
+		first = n;
+	memcpy(rx_ring + at, src, first);
+	if (n > first)
+		memcpy(rx_ring, src + first, n - first);
+}
+
+static void ring_read(uint32_t t, uint8_t *dst, uint32_t n) {
+	uint32_t at = t % RX_RING_SIZE, first = RX_RING_SIZE - at;
+
+	if (first > n)
+		first = n;
+	memcpy(dst, rx_ring + at, first);
+	if (n > first)
+		memcpy(dst + first, rx_ring, n - first);
+}
+
+/* Event-driven receive (SGOLD, config.rx_message != 0): the stack callback posts one message to
+ * the owner process (BTPAN) when the ring gets data, instead of a 5-tick poll timer that ran 43
+ * times a second and on S65 got lost now and then (D106 trace: 21 restarts in 3 min). */
+static volatile uint16_t rx_wake_cepid;
+static volatile uint32_t rx_wake_msg;
+static volatile int rx_wake_pending;
+static uint32_t rx_wakes;
+
+static void rx_wake(void) {
+	if (!rx_wake_msg || rx_wake_pending)
+		return;
+	rx_wake_pending = 1;
+	++rx_wakes;
+	GBS_SendMessage(rx_wake_cepid, rx_wake_msg, 0, 0, 0);
+}
+
 static int sdev_rx(const uint8_t *data, int len, int index) {
 	uint32_t h;
-	int i;
+	uint8_t hdr[2];
 
 	(void)index;
 	if (len <= 0)
@@ -68,15 +107,17 @@ static int sdev_rx(const uint8_t *data, int len, int index) {
 	if (rx_head - rx_tail + 2u + (uint32_t)len > RX_RING_SIZE) {
 		rx_held = 1;
 		++rx_refused;
+		rx_wake();
 		return 0;
 	}
 	rx_bytes_in += (uint32_t)len;
 	h = rx_head;
-	rx_ring[h++ % RX_RING_SIZE] = (uint8_t)len;
-	rx_ring[h++ % RX_RING_SIZE] = (uint8_t)(len >> 8);
-	for (i = 0; i < len; i++)
-		rx_ring[h++ % RX_RING_SIZE] = data[i];
-	rx_head = h;
+	hdr[0] = (uint8_t)len;
+	hdr[1] = (uint8_t)(len >> 8);
+	ring_write(h, hdr, 2);
+	ring_write(h + 2, data, (uint32_t)len);
+	rx_head = h + 2 + (uint32_t)len;
+	rx_wake();
 	return len;
 }
 
@@ -287,18 +328,30 @@ static void bt_panu_handle_packet(struct bt_panu *panu, const uint8_t *packet, s
 }
 
 /* Take queued packets out of rx_ring. drop: closing, discard them. */
+static void bt_panu_drain_ring_(struct bt_panu *panu, bool drop);
+
 static void bt_panu_drain_ring(struct bt_panu *panu, bool drop) {
+	uint32_t t0 = BTP_STM_TIM0, d;
+
+	bt_panu_drain_ring_(panu, drop);
+	d = BTP_STM_TIM0 - t0;
+	rx_drain_ticks += d;
+	if (d > rx_drain_max)
+		rx_drain_max = d;
+}
+
+static void bt_panu_drain_ring_(struct bt_panu *panu, bool drop) {
 	unsigned int packets = 0;
 
 	while (rx_head != rx_tail && packets++ < 32) {
 		uint32_t t = rx_tail;
-		uint32_t n = rx_ring[t % RX_RING_SIZE] | (uint32_t)rx_ring[(t + 1) % RX_RING_SIZE] << 8;
-		uint32_t i;
+		uint8_t hdr[2];
+		uint32_t n;
 
-		t += 2;
-		for (i = 0; i < n; i++)
-			panu->rx_buf[i] = rx_ring[t++ % RX_RING_SIZE];
-		rx_tail = t;
+		ring_read(t, hdr, 2);
+		n = hdr[0] | (uint32_t)hdr[1] << 8;
+		ring_read(t + 2, panu->rx_buf, n);
+		rx_tail = t + 2 + n;
 		++rx_drained;
 		if (!drop)
 			bt_panu_handle_packet(panu, panu->rx_buf, n);
@@ -311,15 +364,93 @@ static void bt_panu_drain_ring(struct bt_panu *panu, bool drop) {
 		bt_panu_deliver();
 }
 
+static bool bt_panu_rx_active(struct bt_panu *panu) {
+	return panu->state == BT_PANU_STATE_CONNECTED && panu->conn != BT_INVALID_HANDLE;
+}
+
+/* wake mode: after a drain, keep a short follow-up poll only while something is pending
+ * (ring not empty, a refusal, the device's pool below its level); stop after 4 polls in a
+ * row with nothing new from the stack - the next packet posts a message again */
+static unsigned rx_follow_idle;
+static uint32_t rx_follow_calls;
+
+static void bt_panu_poll_rx(GBSTMR *timer);
+
+static void bt_panu_rx_follow(struct bt_panu *panu) {
+	if (rx_head != rx_tail) {
+		rx_follow_idle = 0;
+		rx_wake(); /* more than one batch: continue through the queue, others' messages first */
+		return;
+	}
+	if (!rx_held && POOL_RX_FREE() >= panu->pool_rx_base)
+		return;
+	if (rx_calls != rx_follow_calls) {
+		rx_follow_calls = rx_calls;
+		rx_follow_idle = 0;
+	} else if (++rx_follow_idle > 4) {
+		return;
+	}
+	if (!IsTimerProc(&panu->rx_timer))
+		GBS_StartTimerProc(&panu->rx_timer, BT_PANU_RX_POLL_TICKS, bt_panu_poll_rx);
+}
+
 static void bt_panu_poll_rx(GBSTMR *timer) {
 	struct bt_panu *panu = container_of(timer, struct bt_panu, rx_timer);
 
-	if (panu->state != BT_PANU_STATE_CONNECTED || panu->conn == BT_INVALID_HANDLE)
+	if (!bt_panu_rx_active(panu))
 		return;
 	bt_panu_drain_ring(panu, false);
 	++rx_polls;
-	if (panu->state == BT_PANU_STATE_CONNECTED && panu->conn != BT_INVALID_HANDLE)
+	if (!bt_panu_rx_active(panu))
+		return;
+	if (rx_wake_msg)
+		bt_panu_rx_follow(panu);
+	else
 		GBS_StartTimerProc(&panu->rx_timer, BT_PANU_RX_POLL_TICKS, bt_panu_poll_rx);
+}
+
+/* the owner process got config.rx_message */
+void bt_panu_rx_event(struct bt_panu *panu) {
+	rx_wake_pending = 0;
+	if (!bt_panu_rx_active(panu))
+		return;
+	rx_follow_idle = 0;
+	bt_panu_drain_ring(panu, false);
+	++rx_polls;
+	if (bt_panu_rx_active(panu))
+		bt_panu_rx_follow(panu);
+}
+
+/* Called once a second / every 5 s from BTPAN. Poll mode (EL71): no poll since the last call
+ * -> the GBS timer restart got lost (S65 D97: after ~300 KB) -> poll here, it re-arms.
+ * Wake mode (SGOLD): data waiting but nothing drained since the last call (a lost message)
+ * -> drain here; the device's pool below its level with no traffic -> one fn[1]. */
+void bt_panu_rx_guard(struct bt_panu *panu) {
+	static uint32_t last_polls = 0xffffffffu, last_drained = 0xffffffffu, last_calls;
+
+	if (!bt_panu_rx_active(panu)) {
+		last_polls = last_drained = 0xffffffffu;
+		return;
+	}
+	if (rx_wake_msg) {
+		if ((rx_head != rx_tail || rx_held) && rx_drained == last_drained) {
+			++rx_restarts;
+			rx_wake_pending = 0;
+			bt_panu_rx_event(panu);
+		} else if (POOL_RX_FREE() < panu->pool_rx_base && rx_calls == last_calls) {
+			bt_panu_deliver();
+		}
+		last_drained = rx_drained;
+		last_calls = rx_calls;
+		return;
+	}
+	if (rx_polls == last_polls) {
+		++rx_restarts;
+		if (IsTimerProc(&panu->rx_timer))
+			GBS_StopTimer(&panu->rx_timer);
+		bt_panu_poll_rx(&panu->rx_timer);
+	}
+	last_polls = rx_polls;
 }
 
 uint32_t bt_panu_rx_count(void) {
@@ -337,6 +468,25 @@ void bt_panu_rx_report(struct bt_panu *panu, const char *why) {
 				(unsigned long)(rx_head - rx_tail), (unsigned)POOL_RX_FREE(),
 				(unsigned)panu->pool_rx_base, (unsigned)POOL_TX_FREE(), (unsigned)panu->pool_tx_base);
 	usart_puts(panu->log_buf);
+}
+
+void bt_panu_rx_counters(char *buf, unsigned size) {
+	unsigned rmc = (BTP_STM_CLC >> 8) & 0xffu;
+	uint32_t us = (uint32_t)((uint64_t)rx_drain_ticks * (rmc ? rmc : 1u) / 26u);
+	uint32_t max_us = (uint32_t)((uint64_t)rx_drain_max * (rmc ? rmc : 1u) / 26u);
+	int k;
+
+	rx_drain_ticks = rx_drain_max = 0; /* per heartbeat */
+	k = snprintf(buf, size, "  DRAIN %lu us/s max %lu us\r\n", (unsigned long)us, (unsigned long)max_us);
+	buf += k;
+	size -= (unsigned)k;
+	snprintf(buf, size,
+			 "  RXP calls %lu bytes %lu refused %lu dropped %lu drained %lu delivers %lu polls %lu held %d "
+			 "ring %lu btpool rx %u tx %u restarts %lu wakes %lu\r\n",
+			 (unsigned long)rx_calls, (unsigned long)rx_bytes_in, (unsigned long)rx_refused,
+			 (unsigned long)rx_dropped, (unsigned long)rx_drained, (unsigned long)rx_delivers,
+			 (unsigned long)rx_polls, rx_held, (unsigned long)(rx_head - rx_tail),
+			 (unsigned)POOL_RX_FREE(), (unsigned)POOL_TX_FREE(), (unsigned long)rx_restarts, (unsigned long)rx_wakes);
 }
 
 /* let the device hand over anything it holds back, then drain */
@@ -386,6 +536,12 @@ static void bt_panu_connection_opened(struct bt_panu *panu, BT_HANDLE conn, unsi
 		return;
 
 	panu->state = BT_PANU_STATE_CONNECTED;
+#ifdef SGOLD
+	panu->neg_tx_mtu = panu->config.tx_mtu; /* no parameters event on the CA layer */
+	panu->neg_rx_mtu = panu->config.rx_mtu;
+#else
+	panu->neg_tx_mtu = panu->neg_rx_mtu = 0; /* until L2CAP_PARAMETERS_CFM */
+#endif
 	panu->setup_attempts = 0;
 	panu->setup_accepted = false;
 	panu->pool_tx_base = POOL_TX_FREE();
@@ -396,7 +552,13 @@ static void bt_panu_connection_opened(struct bt_panu *panu, BT_HANDLE conn, unsi
 #ifndef SGOLD
 	BTA_Conn_GetL2CAPParamReq(panu->accessor, panu->conn, ++panu->transaction_id);
 #endif
-	GBS_StartTimerProc(&panu->rx_timer, BT_PANU_RX_POLL_TICKS, bt_panu_poll_rx);
+	rx_wake_cepid = panu->config.owner_cepid;
+	rx_wake_pending = 0;
+	rx_wake_msg = panu->config.rx_message; /* 0: the periodic poll */
+	if (rx_wake_msg)
+		rx_wake(); /* anything that came with the open */
+	else
+		GBS_StartTimerProc(&panu->rx_timer, BT_PANU_RX_POLL_TICKS, bt_panu_poll_rx);
 	GBS_StartTimerProc(&panu->setup_timer, 22, bt_panu_send_setup);
 }
 
@@ -638,6 +800,7 @@ static void bt_panu_open_failed(struct bt_panu *panu, unsigned result, unsigned 
 }
 
 static void bt_panu_closed(struct bt_panu *panu, bool by_peer) {
+	rx_wake_msg = 0;
 	bt_panu_stop_timer(&panu->rx_timer);
 	bt_panu_stop_timer(&panu->setup_timer);
 	bt_panu_stop_timer(&panu->close_timer);
@@ -747,6 +910,8 @@ void bt_panu_handle_bta_msg(struct bt_panu *panu, GBS_MSG *msg) {
 			bt_panu_open_failed(panu, event->result, event->result_detail);
 			break;
 		case BT_EVENT_CONNECTION_L2CAP_PARAMETERS_CFM:
+			panu->neg_tx_mtu = (uint16_t)event->parameter.l2cap_parameters.tx_mtu;
+			panu->neg_rx_mtu = (uint16_t)event->parameter.l2cap_parameters.rx_mtu;
 			sprintf(panu->log_buf, "L2CAP negotiated: txMTU=%u rxMTU=%u\r\n",
 					event->parameter.l2cap_parameters.tx_mtu,
 					event->parameter.l2cap_parameters.rx_mtu);
@@ -768,6 +933,7 @@ void bt_panu_stop(struct bt_panu *panu) {
 
 	panu->state = BT_PANU_STATE_STOPPING;
 	bt_panu_stop_timer(&panu->setup_timer);
+	rx_wake_msg = 0;
 	bt_panu_stop_timer(&panu->rx_timer);
 
 	if (panu->conn == BT_INVALID_HANDLE || panu->accessor == BT_INVALID_HANDLE ||
@@ -792,6 +958,7 @@ int bt_panu_deinit(struct bt_panu *panu) {
 	}
 
 	bt_panu_stop_timer(&panu->setup_timer);
+	rx_wake_msg = 0;
 	bt_panu_stop_timer(&panu->rx_timer);
 	bt_panu_stop_timer(&panu->close_timer);
 	bt_panu_stop_timer(&panu->acl_timer);

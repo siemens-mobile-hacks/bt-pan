@@ -51,6 +51,9 @@
 
 #include "enip.h"
 #include "usart.h"
+#include "bt_sg.h"
+#include "bt_panu.h"
+void bt_pan_rx_guard(void); /* main.c */
 
 #define PAN_LMAN_CEPID 0x40DD
 /* HTTP processes: every LMAN connect is their http_connect (A0CB06AC -> LMAN_Connect A0CB134C);
@@ -311,7 +314,7 @@ static void gh_trace(void) {
 	}
 	dst = PAN_RAM(r[4]) ? (const unsigned char *)r[4] : NULL;
 	sprintf(buf, "GH name='%s' flag=%lX res=%08lX id=%lX dnsmod=%lX", name, (unsigned long)r[0],
-			(unsigned long)r[2], (unsigned long)r[3], (unsigned long)*(volatile uint32_t *)0xA876D400u);
+			(unsigned long)r[2], (unsigned long)r[3], bt_sg_dns_state() ? (unsigned long)*(volatile uint32_t *)bt_sg_dns_state() : 0ul);
 	trace(buf);
 	if (dst) {
 		sprintf(buf, "GH dest %02X%02X %02X%02X %02X%02X bearer=%u %02X iface=%u", dst[0], dst[1], dst[2],
@@ -322,7 +325,7 @@ static void gh_trace(void) {
 
 /* after the handler: the dispatcher stores the resolver's return at req+0x14 (u16), 1 at +0x18
  * (A131A07E). 0x31 = status poll (A131A01C -> A12B4960(req[0]) -> req[1]); logged on change.
- * DNS module state A876D400: 4 query slots of 0x34 at +0x80 (+0x24 open, +0x28 socket,
+ * DNS module state (S65 A876D400, SK65 A8F16CB4, bt_sg_dns_state()): 4 query slots of 0x34 at +0x80 (+0x24 open, +0x28 socket,
  * +0x2C local ip, +0x30 port, +0x34/+0x38 dns, A12B4B5E/A12B577E). */
 static unsigned gh_dumps;
 static uint32_t gh_poll_last = 0xdeadbeefu;
@@ -348,8 +351,8 @@ static void gh_after(void) {
 	if (gh_dumps >= 6)
 		return;
 	++gh_dumps;
-	for (i = 0; i < 4; ++i) {
-		const volatile uint32_t *q = (const volatile uint32_t *)(0xA876D400u + 0x80u + i * 0x34u);
+	for (i = 0; i < 4 && bt_sg_dns_state(); ++i) {
+		const volatile uint32_t *q = (const volatile uint32_t *)(bt_sg_dns_state() + 0x80u + i * 0x34u);
 		const volatile unsigned char *qb = (const volatile unsigned char *)q;
 
 		sprintf(buf, "DNS slot%u open=%u sock=%08lX ip=%08lX port=%u dns=%08lX %08lX", i, qb[0x24],
@@ -516,31 +519,8 @@ void pan_lman_poll(void) {
 	if (!pan_wanted)
 		return;
 	GBS_StartTimerProc(&poll_timer, 216, (void (*)(GBSTMR *))pan_lman_poll);
-#if BT_PAN_TRACE
-	{ /* heartbeat: this timer runs in BTPAN; its absence = BTPAN stuck */
-		static unsigned beat, done;
-		unsigned n = trace_pkt_n;
-
-		if (n - done > TRACE_PKT_N)
-			done = n - TRACE_PKT_N; /* overwritten */
-		if (beat < 600) {
-			sprintf(log_buf, "HB %u cepid=%X rx=%lu tx=%lu pkts=%u", beat, (unsigned)GBS_GetCurCepid(),
-					(unsigned long)bt_pan_rx_bytes, (unsigned long)bt_pan_tx_bytes, n);
-			trace(log_buf);
-		}
-		++beat;
-		for (; done != n; ++done) {
-			const struct trace_pkt *t = &trace_pkts[done % TRACE_PKT_N];
-
-			if (done >= 400)
-				continue;
-			sprintf(log_buf, "%c %u.%u.%u.%u p%u len %u %u->%u f%02X in %X", t->dir, t->peer[0],
-					t->peer[1], t->peer[2], t->peer[3], t->proto, t->len, t->sport, t->dport, t->flags,
-					t->cepid);
-			trace(log_buf);
-		}
-	}
-#endif
+	bt_pan_rx_guard(); /* main.c: restart the receive poll if its timer got lost */
+	trace_heartbeat(); /* TRACE builds: bt_pan_netif.c */
 	if (!pan_ready)
 		return;
 	if (!lman_proc || http_hooked() < PAN_HTTP_N)
@@ -593,6 +573,7 @@ int hooks_patch_state(void) {
 
 #include "enip.h"
 #include "usart.h"
+void bt_pan_rx_guard(void); /* main.c */
 
 #define PAN_ENIP_CEPID 0x40B4
 #define PAN_HTTP_CEPID 0x4338
@@ -1128,6 +1109,8 @@ void pan_lman_poll(void) {
 	if (!pan_ready)
 		return;
 	GBS_StartTimerProc(&poll_timer, 216, (void (*)(GBSTMR *))pan_lman_poll);
+	bt_pan_rx_guard(); /* main.c */
+	trace_heartbeat(); /* TRACE builds: bt_pan_netif.c */
 	if (!java_proc || !http_proc)
 		hooks_install(); /* Java/HTTP processes may start after PAN came up */
 	{
