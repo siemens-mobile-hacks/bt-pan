@@ -32,6 +32,8 @@ struct bt_pan_netif_config {
 	int16_t iface_index;
 	void (*connected)(struct bt_pan_netif *netif);
 	void (*disconnected)(struct bt_pan_netif *netif);
+	uint16_t tx_cepid;   /* ELKA: != 0 -> ENIP's sends run in this process on tx_message */
+	uint32_t tx_message; /* (bt_pan_netif_tx_event), not in ElfLoader's shared helper */
 };
 
 struct bt_pan_netif {
@@ -40,6 +42,10 @@ struct bt_pan_netif {
 	struct bt_pan_netif_config config;
 	struct bt_panu *panu;
 	uint32_t run_result;
+	volatile int tx_posted; /* tx_message is in the owner's queue */
+	GBSTMR tx_retry_timer;  /* ELKA: resend a TCP packet the BT send buffers refused (D138) */
+	unsigned tx_retry_len, tx_retry_tries;
+	uint8_t tx_retry_buf[sizeof(struct bnep_general_hdr) + ETH_DATA_LEN];
 	int16_t lman_connection;
 	bool registered;
 	enum bt_pan_dhcp_state dhcp_state;
@@ -53,11 +59,33 @@ struct bt_pan_netif {
 
 extern const struct bt_panu_cb bt_pan_netif_cb;
 
+/* Status screen counters (D138), all builds. */
+struct bt_pan_diag {
+	uint32_t alloc_fail;     /* RX packets dropped: no ENIP buffer (pool/quota/heap) */
+	uint32_t tx_fail;        /* our IP packets the BT send refused */
+	uint32_t tx_retry_ok;    /* ... of them resent later (ELKA) */
+	uint32_t tx_retry_lost;  /* ... given up or superseded */
+	uint32_t retx;           /* TCP segments from the net we already had: the peer retransmitted */
+	uint32_t win_zero;       /* our ACKs with window 0 */
+	uint16_t win_last;       /* window of our last ACK */
+	uint16_t win_low;        /* lowest non-SYN window since the UI took it (0xFFFF = none) */
+	uint32_t pool_max;       /* highest ENIP RX pool use seen at our allocations */
+	uint32_t enip_bytes;     /* IP bytes handed to ENIP */
+	uint32_t tcp_in, tcp_out;
+};
+extern struct bt_pan_diag bt_pan_diag;
+void bt_pan_diag_reset(void);
+/* ENIP bytes: our RX pool(s) in use; EL71 TCP sockets' RX accounts (0 elsewhere) */
+unsigned bt_pan_diag_pool_used(void);
+unsigned bt_pan_diag_sock_rx_used(void);
+
 void bt_pan_netif_init(struct bt_pan_netif *netif, const struct bt_pan_netif_config *config);
 int bt_pan_netif_start(struct bt_pan_netif *netif);
 void bt_pan_netif_stop(struct bt_pan_netif *netif);
 /* largest IPv4 packet sent (the IP MTU) */
 unsigned bt_pan_netif_tx_max(void);
+/* the owner process got config.tx_message: run ENIP's queued sends */
+void bt_pan_netif_tx_event(struct bt_pan_netif *netif);
 /* Send one IPv4 packet in a caller-owned BT_PAN_FRAME_SIZE buffer (any process). 1 = sent. */
 void bt_pan_netif_arp_probe(struct bt_pan_netif *netif, uint32_t target_ip); /* wire order */
 int bt_pan_netif_send_frame(struct bt_pan_netif *netif, uint8_t *frame, const uint8_t *packet,

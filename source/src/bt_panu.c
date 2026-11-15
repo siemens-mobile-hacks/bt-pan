@@ -47,6 +47,7 @@ static volatile unsigned int sdev_opens, sdev_regs, sdev_closes;
 static volatile int sdev_last_type, sdev_last_app;
 /* receive path counters for the heartbeat line: stack callback -> ring -> our drain */
 static volatile uint32_t rx_calls, rx_refused, rx_bytes_in;
+static volatile uint32_t rx_ring_max, tx_pool_min = 0xffffu, tx_short; /* status screen (D138) */
 static uint32_t rx_drained, rx_delivers, rx_polls, rx_restarts;
 static uint32_t rx_drain_ticks, rx_drain_max; /* STM ticks spent draining (trace) */
 #define BTP_STM_TIM0 (*(volatile uint32_t *)0xF4B00010u)
@@ -117,6 +118,8 @@ static int sdev_rx(const uint8_t *data, int len, int index) {
 	ring_write(h, hdr, 2);
 	ring_write(h + 2, data, (uint32_t)len);
 	rx_head = h + 2 + (uint32_t)len;
+	if (rx_head - rx_tail > rx_ring_max)
+		rx_ring_max = rx_head - rx_tail;
 	rx_wake();
 	return len;
 }
@@ -272,7 +275,10 @@ int bt_panu_send(struct bt_panu *panu, const uint8_t *data, size_t len) {
 	WHERE("sdev write", len);
 	written = ((int (*)(const uint8_t *, int, int))dev->fn[2])(data, (int)len, dev->inst);
 	WHERE("sdev write done", written);
+	if (bt_pool && POOL_TX_FREE() < tx_pool_min)
+		tx_pool_min = POOL_TX_FREE();
 	if (written < (int)len) {
+		++tx_short;
 		sprintf(panu->log_buf, "BNEP TX %u -> %d (pool tx %u)\r\n", (unsigned int)len, written,
 				(unsigned int)POOL_TX_FREE());
 		usart_puts(panu->log_buf);
@@ -356,6 +362,9 @@ static void bt_panu_drain_ring_(struct bt_panu *panu, bool drop) {
 		if (!drop)
 			bt_panu_handle_packet(panu, panu->rx_buf, n);
 		if (!drop && panu->state != BT_PANU_STATE_CONNECTED)
+			break;
+		/* D137: our ACKs wait in this process's queue; let them out, rx_follow posts the rest */
+		if (!drop && panu->config.rx_yield && *panu->config.rx_yield)
 			break;
 	}
 	/* The device holds received buffers until fn[1]: pump it after a refusal, and while the
@@ -451,6 +460,23 @@ void bt_panu_rx_guard(struct bt_panu *panu) {
 		bt_panu_poll_rx(&panu->rx_timer);
 	}
 	last_polls = rx_polls;
+}
+
+void bt_panu_diag(struct bt_panu_diag *d) {
+	d->refused = rx_refused;
+	d->dropped = rx_dropped;
+	d->ring_max = rx_ring_max;
+	d->tx_pool_min = tx_pool_min == 0xffffu ? 0 : tx_pool_min;
+	d->tx_pool_base = 0;
+	d->tx_short = tx_short;
+	d->bytes_in = rx_bytes_in;
+}
+
+void bt_panu_diag_reset(void) {
+	rx_refused = rx_dropped = 0;
+	rx_ring_max = 0;
+	tx_pool_min = 0xffffu;
+	tx_short = 0;
 }
 
 uint32_t bt_panu_rx_count(void) {

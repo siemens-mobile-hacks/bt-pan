@@ -46,6 +46,7 @@ static const unsigned ping_sizes[] = {56, 512, 1472};
 /* traffic speed, once a second from the poll */
 static uint32_t rate_last_rx, rate_last_tx;
 static unsigned rate_rx, rate_tx;
+static unsigned diag_win_low = 0xffffu; /* lowest window of our ACKs in the last second */
 
 static void AppExit(void);
 static void AppMinimize(void);
@@ -118,7 +119,7 @@ static SCREEN scr[SCR_N];
 
 enum {
 	M_CONNECT, M_STATUS, M_HINT, M_PC, M_AUTO, M_IP, M_GW, M_DNS, M_MTU, M_RX, M_TX,
-	M_TEST, M_PING, M_MIN, M_EXIT
+	M_D_WIN, M_D_RX, M_D_TX, M_D_POOL, M_D_RING, M_TEST, M_PING, M_MIN, M_EXIT
 };
 enum { T_BTN0, T_RUN0, T_DL0, T_UL0, T_BTN1, T_RUN1, T_DL1, T_UL1, T_HINT };
 enum { P_BTN, P_SIZE, P_TO, P_ERR, P_LAST, P_REPLIES, P_LOST, P_AVG, P_MINMAX, P_HIST };
@@ -135,7 +136,9 @@ static int Rows(int s, unsigned char *r) {
 				if (netif.config.dns1) r[n++] = M_DNS;
 				r[n++] = M_MTU;
 			}
-			r[n++] = M_RX; r[n++] = M_TX; r[n++] = M_TEST; r[n++] = M_PING; r[n++] = M_MIN;
+			r[n++] = M_RX; r[n++] = M_TX;
+			if (Online()) { r[n++] = M_D_WIN; r[n++] = M_D_RX; r[n++] = M_D_TX; r[n++] = M_D_POOL; r[n++] = M_D_RING; }
+			r[n++] = M_TEST; r[n++] = M_PING; r[n++] = M_MIN;
 			r[n++] = M_EXIT;
 			break;
 		case SCR_TEST:
@@ -189,6 +192,15 @@ static void Sig(int s, unsigned *st, unsigned *live) {
 			}
 			MIX(b, bt_pan_rx_bytes / 100u); MIX(b, bt_pan_tx_bytes / 100u);
 			MIX(b, rate_rx / 100u); MIX(b, rate_tx / 100u);
+			if (Online()) {
+				struct bt_panu_diag d;
+				bt_panu_diag(&d);
+				MIX(b, bt_pan_diag.win_last); MIX(b, diag_win_low); MIX(b, bt_pan_diag.win_zero);
+				MIX(b, bt_pan_diag.alloc_fail); MIX(b, bt_pan_diag.retx); MIX(b, bt_pan_diag.tx_fail);
+				MIX(b, bt_pan_diag.tx_retry_ok); MIX(b, bt_pan_diag.pool_max);
+				MIX(b, bt_pan_diag_pool_used() / 100u); MIX(b, bt_pan_diag_sock_rx_used() / 100u);
+				MIX(b, d.dropped); MIX(b, d.refused); MIX(b, d.ring_max / 100u); MIX(b, d.tx_pool_min);
+			}
 			break;
 		case SCR_TEST:
 			for (i = 0; i < 2; ++i) {
@@ -265,6 +277,42 @@ static void MainItem(void *gui, int item_n, void *user) {
 				l = strlen(b);
 				snprintf(b + l, sizeof(b) - l, ", %s", v);
 			}
+			break;
+		}
+		/* D138 counters, since Connect: window of our ACKs (last, lowest in the last second,
+		 * zero-window count); RX losses; TX refusals by the BT send buffers; ENIP bytes */
+		case M_D_WIN:
+			if (diag_win_low == 0xffffu) snprintf(v, sizeof(v), "-");
+			else snprintf(v, sizeof(v), "%u", diag_win_low);
+			snprintf(b, sizeof(b), "Win %u low %s z%lu", (unsigned)bt_pan_diag.win_last, v,
+					 (unsigned long)bt_pan_diag.win_zero);
+			break;
+		case M_D_RX: {
+			struct bt_panu_diag d;
+			bt_panu_diag(&d);
+			snprintf(b, sizeof(b), "Drop %lu/%lu retx %lu", (unsigned long)d.dropped,
+					 (unsigned long)bt_pan_diag.alloc_fail, (unsigned long)bt_pan_diag.retx);
+			break;
+		}
+		case M_D_TX: {
+			struct bt_panu_diag d;
+			bt_panu_diag(&d);
+			snprintf(b, sizeof(b), "TXf %lu ok%lu x%lu BT%lu/%u",
+					 (unsigned long)bt_pan_diag.tx_fail, (unsigned long)bt_pan_diag.tx_retry_ok,
+					 (unsigned long)bt_pan_diag.tx_retry_lost, (unsigned long)d.tx_pool_min,
+					 (unsigned)panu.pool_tx_base);
+			break;
+		}
+		case M_D_POOL: {
+			snprintf(b, sizeof(b), "Pool %u/%lu s%u", bt_pan_diag_pool_used(),
+					 (unsigned long)bt_pan_diag.pool_max, bt_pan_diag_sock_rx_used());
+			break;
+		}
+		case M_D_RING: {
+			struct bt_panu_diag d;
+			bt_panu_diag(&d);
+			snprintf(b, sizeof(b), "Ring %lu held %lu", (unsigned long)d.ring_max,
+					 (unsigned long)d.refused);
 			break;
 		}
 		case M_TEST: ItemText(gui, item_n, "Speed test..."); return;
@@ -564,6 +612,7 @@ static void ConnectToggle(void) {
 		ShowMSG(1, (int)"Undo the old hook patch and install the new one");
 	} else if (addr_ok) {
 		bt_pan_rx_bytes = bt_pan_tx_bytes = 0;
+		bt_pan_diag_reset();
 		rate_last_rx = rate_last_tx = 0;
 		rate_rx = rate_tx = 0;
 		AppStartPan();
@@ -697,6 +746,8 @@ static void UiPoll(GBSTMR *timer) {
 		rate_last_rx = rx;
 		rate_last_tx = tx;
 		ui_live_at = ui_ticks;
+		diag_win_low = bt_pan_diag.win_low;
+		bt_pan_diag.win_low = 0xffffu;
 	}
 	ui_in_poll = true;
 	for (s = 0; s < SCR_N; ++s) {

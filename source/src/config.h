@@ -79,8 +79,12 @@ extern unsigned bt_pan_tx_max;
 #else
 #define BT_PAN_MTU 1500u
 #endif
-/* EL71: TCP RX account limit for normal sockets (stock 5000 -> window 3000); 12000 -> 9300 */
-#define BT_PAN_EL71_RX_LIMIT 12000u
+/* EL71: TCP RX account limit for normal sockets (stock 5000 -> window 3000). D129 12000 -> 9300;
+ * D137 20000 -> 16500, the firmware's own "big" socket value (slots 0x1F-0x22). Throughput per
+ * stream <= window / RTT: 9300 at an internet RTT of 0.2-0.3 s is the ~40 KB/s ceiling seen with
+ * a 320k radio. Must stay < 65535 (window and A097BF5C free are u16). Data sits in ENIP1_HEAP
+ * (flash table A12E1E74: 0x4CD34 = 307 KB), not ours. */
+#define BT_PAN_EL71_RX_LIMIT 20000u
 
 /* Keep the connection alive long enough to test from the host. 1 hour. */
 #define BT_PANU_RUN_SECONDS 3600u

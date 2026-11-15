@@ -32,13 +32,15 @@
  *    3000; the quota argument is ignored. Pool 4 (10000, native PPP/GPRS receive, idle without a
  *    SIM) first, the native link pool 6 (5000, caller A13358B2) as the overflow.
  *  - ELKA (EL71): limits at A0C49574 = 4000 8000 8000 10000 6000 5000 2000; limit = pool limit *
- *    quota / 100 (A097B468). The native link pool 5 at quota 300 = 15000 for our packets only. */
+ *    quota / 100 (A097B468). The native link pool 5 at quota 600 = 30000 for our packets only
+ *    (D137 400, D138 600: windows of 16500, room for a backlog while ENIP is busy). Packets leave
+ *    the pool for the socket's account as soon as ENIP reads them (A097BF76). */
 #define BT_PAN_NETIF_RX_OFFSET 7
 static const struct { uint8_t pool; uint16_t quota; } bt_pan_rx_pools[] = {
 #ifdef SGOLD
 	{4, 100}, {6, 100},
 #else
-	{5, 300},
+	{5, 600},
 #endif
 };
 #define BT_PAN_NETIF_RX_EXTRA 9u
@@ -77,6 +79,81 @@ static void bt_pan_netif_down(ENIP_MODULE *module) {
 }
 
 volatile uint32_t bt_pan_rx_bytes, bt_pan_tx_bytes; /* IPv4 bytes, for the UI */
+struct bt_pan_diag bt_pan_diag = {.win_low = 0xffffu};
+
+void bt_pan_diag_reset(void) {
+	memset(&bt_pan_diag, 0, sizeof(bt_pan_diag));
+	bt_pan_diag.win_low = 0xffffu;
+	bt_panu_diag_reset();
+}
+
+/* our ACKs: the window the phone's stack offers (shrinking = the app or the stack holds data) */
+static void bt_pan_diag_tx_tcp(const uint8_t *packet, size_t length) {
+	unsigned ihl, win;
+
+	if (length < 40u || packet[9] != 6u)
+		return;
+	++bt_pan_diag.tcp_out;
+	ihl = (packet[0] & 0x0fu) * 4u;
+	if (length < ihl + 20u)
+		return;
+	win = (unsigned)packet[ihl + 14] << 8 | packet[ihl + 15];
+	if (packet[ihl + 13] & 0x06u) /* RST (window 0, often ack 0) or SYN: not a data window */
+		return;
+	bt_pan_diag.win_last = (uint16_t)win;
+	if (!win)
+		++bt_pan_diag.win_zero;
+	if (win < bt_pan_diag.win_low)
+		bt_pan_diag.win_low = (uint16_t)win;
+}
+
+/* TCP data from the net: retx = a segment ending at or below the highest seen (the peer sent it
+ * again: something was lost on the way, in ENIP or our ACK was late) */
+#define DIAG_FLOWS 4u
+static struct diag_flow {
+	uint16_t sport, dport;
+	uint32_t high;
+} diag_flow[DIAG_FLOWS];
+static unsigned diag_flow_next;
+
+static void bt_pan_diag_rx_tcp(const uint8_t *ip, size_t length) {
+	unsigned ihl, doff, i, data;
+	uint16_t sport, dport;
+	uint32_t seq, end;
+	struct diag_flow *f;
+
+	if (length < 40u || ip[9] != 6u)
+		return;
+	++bt_pan_diag.tcp_in;
+	ihl = (ip[0] & 0x0fu) * 4u;
+	if (length < ihl + 20u)
+		return;
+	doff = (ip[ihl + 12] >> 4) * 4u;
+	if (length < ihl + doff)
+		return;
+	data = (unsigned)length - ihl - doff;
+	sport = (uint16_t)(ip[ihl] << 8 | ip[ihl + 1]);
+	dport = (uint16_t)(ip[ihl + 2] << 8 | ip[ihl + 3]);
+	seq = (uint32_t)ip[ihl + 4] << 24 | (uint32_t)ip[ihl + 5] << 16 | (uint32_t)ip[ihl + 6] << 8 |
+		  ip[ihl + 7];
+	end = seq + data;
+	for (i = 0; i < DIAG_FLOWS && (diag_flow[i].sport != sport || diag_flow[i].dport != dport); ++i) {}
+	if (i == DIAG_FLOWS || (ip[ihl + 13] & 0x02u)) { /* new flow or SYN: start over */
+		if (i == DIAG_FLOWS)
+			i = diag_flow_next++ % DIAG_FLOWS;
+		diag_flow[i].sport = sport;
+		diag_flow[i].dport = dport;
+		diag_flow[i].high = end + ((ip[ihl + 13] & 0x02u) ? 1u : 0u);
+		return;
+	}
+	if (!data)
+		return;
+	f = &diag_flow[i];
+	if ((int32_t)(end - f->high) > 0)
+		f->high = end;
+	else
+		++bt_pan_diag.retx;
+}
 
 #ifdef SGOLD
 /* ENIP RAM (read by ENIP_PacketAlloc S65 A1335022 / SK65 A09ED21E, init S65 A1334F34 from the
@@ -365,6 +442,30 @@ int bt_pan_netif_send_frame(struct bt_pan_netif *netif, uint8_t *frame, const ui
 	return 1;
 }
 
+#ifndef SGOLD
+static void bt_pan_netif_tx_retry(GBSTMR *timer) {
+	struct bt_pan_netif *netif = container_of(timer, struct bt_pan_netif, tx_retry_timer);
+
+	if (!netif->tx_retry_len)
+		return;
+	if (!netif->registered || !netif->panu) {
+		netif->tx_retry_len = 0;
+		return;
+	}
+	if (bt_panu_send(netif->panu, netif->tx_retry_buf, netif->tx_retry_len)) {
+		netif->tx_retry_len = 0;
+		++bt_pan_diag.tx_retry_ok;
+		return;
+	}
+	if (++netif->tx_retry_tries >= 50u) { /* ~0.23 s: the link is stuck, TCP takes over */
+		netif->tx_retry_len = 0;
+		++bt_pan_diag.tx_retry_lost;
+		return;
+	}
+	GBS_StartTimerProc(&netif->tx_retry_timer, 1, bt_pan_netif_tx_retry);
+}
+#endif
+
 static void bt_pan_netif_send_ipv4(struct bt_pan_netif *netif, const uint8_t *packet,
 								   size_t length) {
 	struct bnep_general_hdr *bnep = (struct bnep_general_hdr *)netif->tx_buf;
@@ -414,10 +515,34 @@ static void bt_pan_netif_send_ipv4(struct bt_pan_netif *netif, const uint8_t *pa
 	bnep->ethernet.ether_type = htons(ETHERTYPE_IP);
 	memcpy(bnep + 1, packet, length);
 	bnep_length = sizeof(*bnep) + length;
-	if (bt_panu_send(netif->panu, netif->tx_buf, bnep_length))
+	bt_pan_diag_tx_tcp(packet, length);
+	if (bt_panu_send(netif->panu, netif->tx_buf, bnep_length)) {
 		trace_pkt('T', packet, length);
-	else
+#ifndef SGOLD
+		/* a newer TCP packet went out: it carries the newer ACK and window, the old one is moot */
+		if (netif->tx_retry_len && packet[9] == 6u) {
+			netif->tx_retry_len = 0;
+			++bt_pan_diag.tx_retry_lost;
+		}
+#endif
+	} else {
 		trace_pkt('D', packet, length);
+		++bt_pan_diag.tx_fail;
+#ifndef SGOLD
+		/* BT send buffers full: losing an ACK is cheap, losing the window update after a zero
+		 * window stalls the peer for its persist timer (seconds). Keep the last TCP one and resend
+		 * it from a 1-tick timer in this process (BTPAN). */
+		if (packet[9] == 6u && netif->config.tx_message) {
+			if (netif->tx_retry_len)
+				++bt_pan_diag.tx_retry_lost;
+			memcpy(netif->tx_retry_buf, netif->tx_buf, bnep_length);
+			netif->tx_retry_len = bnep_length;
+			netif->tx_retry_tries = 0;
+			if (!IsTimerProc(&netif->tx_retry_timer))
+				GBS_StartTimerProc(&netif->tx_retry_timer, 1, bt_pan_netif_tx_retry);
+		}
+#endif
+	}
 
 	/* one line per outgoing packet (ENIP process); ~5 ms of USART each, debug only */
 	if (BT_PAN_LOG_PACKETS && length >= 20) {
@@ -461,8 +586,23 @@ static void bt_pan_netif_post_run(ENIP_MODULE *module) {
 	enip_module_run(module, &netif->run_result);
 	WHERE("post run done", 0);
 #else
-	SUBPROC(enip_module_run, module, &netif->run_result); /* EL71/E71: proven on the phone */
+	/* EL71/E71: ElfLoader's helper (SUBPROC) is shared with every elf: an internet radio decrypting
+	 * TLS and parsing its stream there held our ACKs back behind its work (D137). Our own process
+	 * (BTPAN, the same kind of context as the helper) runs them instead; it also drains the RX ring
+	 * and ends a batch early while this is queued (rx_yield). Helper when no process is set. */
+	if (netif->config.tx_message) {
+		netif->tx_posted = 1;
+		GBS_SendMessage(netif->config.tx_cepid, netif->config.tx_message, 0, 0, 0);
+	} else {
+		SUBPROC(enip_module_run, module, &netif->run_result);
+	}
 #endif
+}
+
+void bt_pan_netif_tx_event(struct bt_pan_netif *netif) {
+	netif->tx_posted = 0;
+	if (netif->registered)
+		enip_module_run(&netif->module, &netif->run_result);
 }
 
 static void bt_pan_netif_packet_available(ENIP_MODULE *module) {
@@ -482,6 +622,8 @@ static void bt_pan_netif_packet_available(ENIP_MODULE *module) {
 #define BT_PAN_EL71_RX_FIRST 7u
 #define BT_PAN_EL71_RX_END 0x13u
 #define BT_PAN_EL71_RX_STOCK 5000u
+/* ENIP_PacketAlloc A097B468: starving pool u8 at used - 0x0C, failed-allocation count u16 at -0x0A */
+#define BT_PAN_EL71_POOL_STARVE ((volatile uint8_t *)0xA8E9EC8Cu)
 
 static int bt_pan_el71(void) {
 	return LIB_ENTRY(0x46A) == 0xA097B469u;
@@ -563,6 +705,7 @@ static int bt_pan_netif_input(struct bt_pan_netif *netif, const uint8_t *packet,
 										  bt_pan_rx_pools[i].pool, BT_PAN_NETIF_RX_OFFSET,
 										  bt_pan_rx_pools[i].quota);
 	if (!enip_packet) {
+		++bt_pan_diag.alloc_fail;
 #ifdef SGOLD
 		/* a failed allocation leaves "starving pool" = ours, which blocks every other pool's
 		 * packets >= 100 bytes (app data, TCP segments) until ours gets one again. Native PPP
@@ -578,14 +721,33 @@ static int bt_pan_netif_input(struct bt_pan_netif *netif, const uint8_t *packet,
 				}
 			UnlockSched();
 		}
+#else
+		/* EL71 has the same claim (A097B468, set when the heap fails within the pool's own
+		 * limit): it blocks other pools' packets >= 100 bytes until ours gets one again */
+		if (bt_pan_el71()) {
+			LockSched();
+			for (i = 0; i < sizeof(bt_pan_rx_pools) / sizeof(bt_pan_rx_pools[0]); ++i)
+				if (*BT_PAN_EL71_POOL_STARVE == bt_pan_rx_pools[i].pool) {
+					*BT_PAN_EL71_POOL_STARVE = 0;
+					break;
+				}
+			UnlockSched();
+		}
 #endif
 		return -2;
 	}
 
+	{
+		unsigned used = bt_pan_diag_pool_used();
+
+		if (used > bt_pan_diag.pool_max)
+			bt_pan_diag.pool_max = used;
+	}
 	enip_packet->data = (uint8_t *)enip_packet->data - BT_PAN_NETIF_RX_HEADROOM;
 	memcpy(enip_packet->data, packet, length);
 	enip_packet->size = length;
 	enip_port_send(netif->driver.port_rx, enip_packet);
+	bt_pan_diag.enip_bytes += length;
 	return 0;
 }
 
@@ -800,6 +962,7 @@ static void bt_pan_netif_recv(struct bt_panu *panu, const uint8_t *packet, size_
 		if (ping_rx(payload, payload_length))
 			return; /* our ping's echo replies */
 
+		bt_pan_diag_rx_tcp(payload, payload_length);
 #if BT_PAN_TRACE
 		struct trace_pkt *tp = trace_pkt('R', payload, payload_length);
 #endif
@@ -850,6 +1013,9 @@ static void bt_pan_netif_disconnected(struct bt_panu *panu, void *user_data) {
 void bt_pan_netif_stop(struct bt_pan_netif *netif) {
 	if (IsTimerProc(&netif->dhcp_timer))
 		GBS_StopTimer(&netif->dhcp_timer);
+	if (IsTimerProc(&netif->tx_retry_timer))
+		GBS_StopTimer(&netif->tx_retry_timer);
+	netif->tx_retry_len = 0;
 
 	if (netif->lman_connection >= 0) {
 		lman_connection_close(netif->lman_connection);
@@ -869,4 +1035,36 @@ void bt_pan_netif_stop(struct bt_pan_netif *netif) {
 		enip_module_down(&netif->module, 0);
 		netif->registered = false;
 	}
+}
+
+unsigned bt_pan_diag_pool_used(void) {
+	unsigned i, sum = 0;
+
+	for (i = 0; i < sizeof(bt_pan_rx_pools) / sizeof(bt_pan_rx_pools[0]); ++i) {
+#ifdef SGOLD
+		if (bt_pan_sg_pool_used())
+			sum += bt_pan_sg_pool_used()[bt_pan_rx_pools[i].pool];
+#else
+		if (bt_pan_el71())
+			sum += ((volatile uint32_t *)0xA8E9EC98u)[bt_pan_rx_pools[i].pool];
+#endif
+	}
+	return sum;
+}
+
+/* EL71: bytes waiting in TCP sockets (RX accounts 7-0x12 normal, 0x1F-0x22 big) - data the stack
+ * holds for apps or out of order; it only shrinks when apps read */
+unsigned bt_pan_diag_sock_rx_used(void) {
+	unsigned sum = 0;
+#ifndef SGOLD
+	unsigned i;
+
+	if (!bt_pan_el71())
+		return 0;
+	for (i = BT_PAN_EL71_RX_FIRST; i < BT_PAN_EL71_RX_END; ++i)
+		sum += ((volatile uint32_t *)0xA8E9EC98u)[i];
+	for (i = 0x1Fu; i < 0x23u; ++i)
+		sum += ((volatile uint32_t *)0xA8E9EC98u)[i];
+#endif
+	return sum;
 }

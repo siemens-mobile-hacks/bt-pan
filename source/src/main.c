@@ -39,6 +39,7 @@
 #define BT_PANU_MESSAGE_PING_START 0x6b55u /* data0 = payload size; ping runs in this process */
 #define BT_PANU_MESSAGE_PING_STOP 0x6b56u
 #define BT_PANU_MESSAGE_RX 0x6b57u /* SGOLD: the stack callback put data into the ring */
+#define BT_PANU_MESSAGE_TX 0x6b58u /* ELKA: ENIP queued packets on our module (D137) */
 
 static struct bt_pan_netif netif;
 
@@ -46,6 +47,9 @@ static struct bt_panu_config panu_config = {
 	.owner_cepid = BT_PANU_PROCESS_CEPID,
 	.message_id = BT_PANU_MESSAGE_BTA,
 	.rx_message = BT_PANU_MESSAGE_RX, /* event-driven receive (SGOLD D112, ELKA D113+) */
+#ifndef SGOLD
+	.rx_yield = &netif.tx_posted, /* ENIP's sends wait in our queue: short batch (D137) */
+#endif
 	.peer_addr = BT_PANU_HOST_BDADDR,
 	.rx_mtu = BT_PANU_RX_MTU,
 	.tx_mtu = BT_PANU_TX_MTU,
@@ -290,6 +294,10 @@ static struct bt_pan_netif_config netif_config = {
 	.iface_index = BT_PAN_IFACE_INDEX,
 	.connected = netif_connected,
 	.disconnected = netif_disconnected,
+#ifndef SGOLD
+	.tx_cepid = BT_PANU_PROCESS_CEPID, /* ENIP's sends: our process, not the shared helper */
+	.tx_message = BT_PANU_MESSAGE_TX,
+#endif
 };
 
 static void pan_stopped(void);
@@ -321,6 +329,10 @@ static void process_messages_(void) {
 	}
 	if (GBS_MSG_ID(msg.msg) == GBS_MSG_ID(BT_PANU_MESSAGE_RX)) {
 		bt_panu_rx_event(&panu); /* the hot path: no logging */
+		return;
+	}
+	if (GBS_MSG_ID(msg.msg) == GBS_MSG_ID(BT_PANU_MESSAGE_TX)) {
+		bt_pan_netif_tx_event(&netif); /* hot path too: ACKs */
 		return;
 	}
 #if BT_PAN_TRACE
