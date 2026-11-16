@@ -78,8 +78,7 @@ or in the BCFG editor: `zbin\etc\BTPAN.bcfg`.
 
 ## Building
 
-ElfLoader 3 SDK in `../sdk` relative to `source/`; in it, replace
-`swilib/include/swilib/socket.h` with the file from `source/sdk-patch/`. Then:
+ElfLoader 3 SDK [dm468/sdk](https://github.com/dm468/sdk) in `../sdk` relative to `source/`. Then:
 
 ```sh
 cd source && cmake -B build -S . && cmake --build build

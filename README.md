@@ -80,8 +80,7 @@
 
 ## Сборка
 
-SDK ElfLoader 3 в `../sdk` относительно `source/`, в нём заменить
-`swilib/include/swilib/socket.h` файлом из `source/sdk-patch/`. Затем:
+SDK ElfLoader 3 [dm468/sdk](https://github.com/dm468/sdk) в `../sdk` относительно `source/`. Затем:
 
 ```sh
 cd source && cmake -B build -S . && cmake --build build
