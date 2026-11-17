@@ -24,7 +24,7 @@ BT PAN (EL71 / E71 sw45): что где лежит в исходниках
 src/ - эльф
 -----------
 main.c          Точка входа и жизненный цикл.
-                - main(): COM-лог, pan_lman_init, загрузка настроек, процесс 0x1A00, экран.
+                - main(): pan_lman_init, загрузка настроек, процесс 0x1A00, экран.
                 - Настройки BCFG: структура PAN_CONFIG (адрес ПК, имя ПК, автопереподключение),
                   файл ?:\zbin\etc\BTPAN.bcfg: config_load/config_save/config_apply,
                   save_peer_addr (из списка устройств), set_auto_reconnect.
@@ -47,7 +47,7 @@ app_ui.h        Экран (подключается в конец main.c).
                   CSM: maincsm_onmessage (события сокетов TCP-теста, перечитывание BCFG),
                   maincsm_onclose (выключение перед выгрузкой эльфа).
 config.h        Константы: IP по умолчанию, MTU для стека (BT_PAN_MTU), номер интерфейса и
-                bearer драйвера, DHCP вкл/выкл, лог каждого пакета, MTU канала L2CAP.
+                bearer драйвера, DHCP вкл/выкл, MTU канала L2CAP.
 
 bt_sg.h          S65 sw58 (SGOLD): CA-слой вместо BTA (MR, L2CAP_New, Conn_Close) по
                   фиксированным адресам, проверка прошивки; используется под #ifdef SGOLD.
@@ -76,7 +76,7 @@ dhcp.c/.h       DHCP-клиент: DISCOVER/REQUEST, разбор OFFER/ACK (IP,
 bt_pan_netif.c/.h  Сетевой интерфейс в стеке телефона.
                 - Регистрация драйвера ENIP (bearer 1, интерфейс 1), MTU, IP, DNS.
                 - bt_pan_netif_send_ipv4: пакет из ENIP -> кадр BNEP -> bt_panu_send;
-                  пакеты > 1500 отбрасываются; в лог - окно/MSS наших TCP SYN.
+                  пакеты > 1500 отбрасываются.
                 - bt_pan_netif_recv: из BNEP: IPv4 -> ENIP, ARP -> ответ, до получения IP -
                   только DHCP.
                 - DHCP по шагам и подъём интерфейса (bringup -> pan_lman_up).
@@ -85,7 +85,7 @@ bt_pan_netif.c/.h  Сетевой интерфейс в стеке телефо�
                 - Счётчики bt_pan_rx_bytes/bt_pan_tx_bytes для экрана.
 enip.h          Структуры стека ENIP прошивки (модуль, драйвер, порт, пакет) и вызовы
                 enip_* (адреса EL71 и E71).
-icmp_probe.c/.h Один ICMP echo к ПК после подъёма (проверка связи в логе).
+icmp_probe.c/.h Один ICMP echo к ПК после подъёма.
 
 pan_lman.c/.h   Чтобы приложения телефона шли в сеть через наш интерфейс.
                 - Приложение просит профиль GPRS (NAP) -> pan_prepare создаёт LMAN-контекст
@@ -97,13 +97,13 @@ pan_lman.c/.h   Чтобы приложения телефона шли в се�
                   (WSP) и эльфы - врезки во флеше (патч из patches/), которые находят наши
                   функции через "шлюз" pan_gateway в обработчике ENIP (метки BTN1/2/3):
                   before_connect, wsp_online, wsp_bearer.
-                - enip_hook: лог запросов socket/dns/connect с владельцем и ошибкой.
                 - pan_self_context: постоянный контекст "BT PAN" для помощника ElfLoader
                   (сокеты эльфов: BalletMini, наш TCP-тест), всегда на cid >= 2.
                 - DNS: заполняет таблицу резолвера A8E9E9CC[интерфейс], пока связь есть,
                   потом возвращает как было.
                 - pan_lman_up/pan_lman_down: включить/снять всё это; contexts_release
-                  рассылает отключение владельцам; pan_lman_poll - лог раз в секунду.
+                  рассылает отключение владельцам; pan_lman_poll - раз в секунду
+                  ставит хуки процессам, появившимся позже.
 
 peers.c/.h      Список сопряжённых устройств для выбора ПК: свой временный аксессор BTA в
                 процессе 0x1A00, только пока связь выключена (BTA_DeviceListView_*).
@@ -119,8 +119,6 @@ speedtest.c/.h  Два спидтеста против speedtest-pc.py (по 6 �
                 - Через стек (s_*): обычный TCP-сокет (порт 5003) в помощнике ElfLoader,
                   события сокета приходят в CSM (speedtest_stack_msg). Меряет то, что
                   видят приложения.
-usart.c/.h      Отладочный COM-лог 115200 (usart_puts под LockSched: пишут несколько
-                процессов).
 freestanding.c  memset (в SDK его нет).
 BT_PANU.md       Старые заметки по первому PoC (частично устарели).
 
@@ -128,7 +126,7 @@ BT_PANU.md       Старые заметки по первому PoC (части
 ---------------
 CMakeLists.txt       Сборка эльфа (SDK ../sdk), список исходников, номер сборки.
 bump_build_id.cmake  Перед каждой сборкой +1 к .buildnum -> build/build_id.h
-                     (BT_PAN_BUILD_TAG "Dxx": шапка экрана и первая строка COM-лога).
+                     (BT_PAN_BUILD_TAG "Dxx": шапка экрана).
 .buildnum            Текущий номер сборки.
 tests/test_dhcp.c    Проверка формата DHCP на ПК (gcc, без телефона).
 nap.sh               ПК: мост pan0, NAT, DHCP (dnsmasq), NAP-сервер BlueZ, сервер спидтеста.

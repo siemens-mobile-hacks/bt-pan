@@ -6,7 +6,6 @@
 
 #include "bt_panu.h"
 #include "bt_pan_netif.h"
-#include "usart.h"
 
 #define TICKS_PER_S 216u
 #define PHASE_TICKS (SPEEDTEST_SECS * TICKS_PER_S)

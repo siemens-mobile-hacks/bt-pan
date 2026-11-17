@@ -53,8 +53,6 @@ extern unsigned bt_pan_tx_max;
  * the driver whose (bearer, iface) equals its context's. No SIM, so no real GPRS driver to clash
  * with; with a SIM a real PDP on iface 1 could. 4 = ARMenian Developer's PoC (apps never routed). */
 #define BT_PAN_DRIVER_BEARER 1
-/* 1 = debug log on the cable port (USART0, 115200). It takes the port from the firmware:
- * without a cable the phone then beeps, so release builds keep it off. */
 /* GBS message id as the receiver sees it: S65 (SGOLD) keeps only the low 10 bits (0x6B51 arrives
  * as 0x351, seen on the phone), so every compare goes through this. */
 #ifdef SGOLD
@@ -63,11 +61,6 @@ extern unsigned bt_pan_tx_max;
 #define GBS_MSG_ID(m) ((unsigned)(m) & 0xffffu)
 #endif
 
-#ifndef BT_PAN_USART_LOG
-#define BT_PAN_USART_LOG 0
-#endif
-/* 1 = log every IPv4 packet (slow: each line holds the USART ~5 ms) */
-#define BT_PAN_LOG_PACKETS 0
 #define BT_PAN_IFACE_INDEX 1
 /* MTU told to the phone's stack. The TCP receive window does NOT depend on it (D24-D128 used
  * 3000 on the guess "window = 2*MTU"; EL71 window = 0.9 * socket RX account - 1500, see

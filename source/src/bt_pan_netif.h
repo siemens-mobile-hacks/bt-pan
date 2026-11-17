@@ -59,26 +59,6 @@ struct bt_pan_netif {
 
 extern const struct bt_panu_cb bt_pan_netif_cb;
 
-/* Status screen counters (D138), all builds. */
-struct bt_pan_diag {
-	uint32_t alloc_fail;     /* RX packets dropped: no ENIP buffer (pool/quota/heap) */
-	uint32_t tx_fail;        /* our IP packets the BT send refused */
-	uint32_t tx_retry_ok;    /* ... of them resent later (ELKA) */
-	uint32_t tx_retry_lost;  /* ... given up or superseded */
-	uint32_t retx;           /* TCP segments from the net we already had: the peer retransmitted */
-	uint32_t win_zero;       /* our ACKs with window 0 */
-	uint16_t win_last;       /* window of our last ACK */
-	uint16_t win_low;        /* lowest non-SYN window since the UI took it (0xFFFF = none) */
-	uint32_t pool_max;       /* highest ENIP RX pool use seen at our allocations */
-	uint32_t enip_bytes;     /* IP bytes handed to ENIP */
-	uint32_t tcp_in, tcp_out;
-};
-extern struct bt_pan_diag bt_pan_diag;
-void bt_pan_diag_reset(void);
-/* ENIP bytes: our RX pool(s) in use; EL71 TCP sockets' RX accounts (0 elsewhere) */
-unsigned bt_pan_diag_pool_used(void);
-unsigned bt_pan_diag_sock_rx_used(void);
-
 void bt_pan_netif_init(struct bt_pan_netif *netif, const struct bt_pan_netif_config *config);
 int bt_pan_netif_start(struct bt_pan_netif *netif);
 void bt_pan_netif_stop(struct bt_pan_netif *netif);

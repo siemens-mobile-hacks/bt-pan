@@ -1,10 +1,8 @@
 #include "peers.h"
 
-#include <stdio.h>
 #include <string.h>
 
 #include "bt.h"
-#include "usart.h"
 
 struct peer peers[PEERS_MAX];
 volatile int peer_count;
@@ -13,7 +11,6 @@ volatile bool peers_busy;
 #ifdef SGOLD
 /* S65: the CA device list (src/bt_sg.h), read entry by entry with an MR of our own. */
 #include "bt_sg.h"
-#include "trace.h"
 
 #define PEERS_TIMEOUT_TICKS (5 * 216)
 
@@ -24,8 +21,6 @@ static GBSTMR timer;
 
 static void peers_timeout(GBSTMR *t) {
 	(void)t;
-	usart_puts("Peers: device list timed out\r\n");
-	trace("Peers: timeout");
 	peers_stop();
 }
 
@@ -55,15 +50,11 @@ void peers_start(uint16_t owner_cepid, uint32_t message_id) {
 	peers_stop();
 	peer_count = 0;
 	if (!ca_handle_ok(dev) || !ca_handle_ok(list = CA_DevList(dev))) {
-		usart_puts("Peers: no device list\r\n");
-		trace("Peers: no device list");
 		return;
 	}
 	mr = CA_MR_New(owner_cepid, (int)message_id, "btpan-peers", 1);
 	if (!ca_handle_ok(mr)) {
 		mr = BT_INVALID_HANDLE;
-		usart_puts("Peers: no MR\r\n");
-		trace("Peers: no MR");
 		return;
 	}
 	peers_busy = true;
@@ -87,17 +78,9 @@ void peers_handle_bta_msg(GBS_MSG *msg) {
 	CA_OBJECT_MESSAGE *event = msg->data0;
 	BT_HANDLE from = (BT_HANDLE)msg->submess;
 	const uint8_t *e = (const uint8_t *)event;
-#if BT_PAN_TRACE
-	char t[64];
-#endif
 
 	if (!event)
 		return;
-#if BT_PAN_TRACE
-	sprintf(t, "Peers: ev class=%X code=%X result=%X 1c=%02X%02X%02X%02X", event->object_class,
-			event->object_message, event->result, e[0x1c], e[0x1d], e[0x1e], e[0x1f]);
-	trace(t);
-#endif
 	if (event->object_class == CA_MR_Class() && event->object_message == CA_MR_STOPPED) {
 		CA_Release(from);
 		if (from == old_mr)
@@ -137,7 +120,6 @@ static void peers_next(void);
 
 static void peers_timeout(GBSTMR *t) {
 	(void)t;
-	usart_puts("Peers: device list timed out\r\n");
 	peers_stop();
 }
 
@@ -171,7 +153,6 @@ void peers_start(uint16_t owner_cepid, uint32_t message_id) {
 	oh = BTA_Accessor_New(owner_cepid, message_id, 0);
 	if (oh == BT_INVALID_HANDLE || oh == 0xffffu) {
 		oh = BT_INVALID_HANDLE;
-		usart_puts("Peers: no accessor\r\n");
 		return;
 	}
 	peers_busy = true;

@@ -1,6 +1,5 @@
 #include <swilib.h>
 #include <cfg_items.h>
-#include <pmb887x.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -15,11 +14,8 @@
 #include "icmp_probe.h"
 #include "pan_lman.h"
 #include "ping.h"
-#include "trace.h"
 #include "peers.h"
 #include "speedtest.h"
-#include "usart.h"
-#include "prof.h"
 
 #define GetProcGroup ((PGROUP * (*)(int)) LIB_ENTRY(0x463)) /* GBS_GetProcGroup */
 
@@ -69,9 +65,7 @@ static GBSTMR watch_timer;
 static GBSTMR reconnect_timer;
 static bool auto_restart;       /* link lost or the RX watchdog took it down: bring it back up */
 static bool reconnect_wait;     /* PAN is down, next attempt on reconnect_timer */
-static unsigned auto_restarts;
 static unsigned reconnect_fails; /* attempts in a row that did not get an IP */
-static char log_buf[256];
 static bool process_created;
 static bool shutdown_started;
 static bool pan_running;  /* PAN on/off, driven by the UI toggle */
@@ -210,24 +204,18 @@ static void send_ping(GBSTMR *timer) {
 
 	(void)timer;
 	memcpy(&destination, peer_ipv4, sizeof(destination));
-	if (icmp_probe_send(&netif.module, netif.config.local_ip, destination)) {
-		usart_puts("ICMP probe: send failed\r\n");
-		return;
-	}
-
-	usart_puts("ICMP probe: echo request queued\r\n");
+	icmp_probe_send(&netif.module, netif.config.local_ip, destination);
 }
 
 /*
  * RX watchdog (BTPAN process, every 5 s). Seen on device: after minutes of idle the phone
  * keeps sending but nothing from the PC arrives any more (PC sends the DNS replies, the
  * phone repeats the query). When nothing came for 10 s, ask the PC (ARP, always answered):
- * keeps the link busy and proves the receive path. No answer in 20 s: log where RX stopped
- * and kick the device; still nothing at 30 s: reconnect BT.
+ * keeps the link busy and proves the receive path. No answer in 20 s: kick the device; still nothing at 30 s: reconnect BT.
  */
 #define WATCH_TICKS (5u * 216u)
 static uint32_t watch_last;
-static unsigned watch_idle, watch_beats;
+static unsigned watch_idle;
 
 /* pan_lman_poll (BTPAN, 1 s) and rx_watch: the receive poll must keep running */
 void bt_pan_rx_guard(void) {
@@ -243,26 +231,16 @@ static void rx_watch(GBSTMR *timer) {
 		return;
 	bt_pan_rx_guard();
 	if (count != watch_last) {
-		if (watch_idle >= 4)
-			bt_panu_rx_report(&panu, "RX watchdog: receive is back\r\n");
 		watch_last = count;
 		watch_idle = 0;
 	} else {
 		++watch_idle;
 	}
-	if (++watch_beats % 12u == 0)
-		bt_panu_rx_report(&panu, "RX watchdog: 60 s\r\n");
 	if (watch_idle >= 2)
 		bt_pan_netif_arp_probe(&netif, pan_server_ip());
-	if (watch_idle == 4) {
-		bt_panu_rx_report(&panu, "RX watchdog: nothing from the PC for 20 s, kicking\r\n");
-		bt_panu_rx_kick(&panu);
-	}
-	if (watch_idle >= 6 && !auto_reconnect) {
-		if (watch_idle == 6)
-			bt_panu_rx_report(&panu, "RX watchdog: receive dead (auto-reconnect off)\r\n");
-	} else if (watch_idle >= 6) {
-		bt_panu_rx_report(&panu, "RX watchdog: receive dead, reconnecting\r\n");
+	if (watch_idle == 4)
+		bt_panu_rx_kick(&panu); /* nothing from the PC for 20 s */
+	if (watch_idle >= 6 && auto_reconnect) { /* receive dead: reconnect */
 		auto_restart = true;
 		begin_shutdown(NULL);
 		return;
@@ -275,7 +253,7 @@ static void netif_connected(struct bt_pan_netif *connected_netif) {
 	GBS_StartTimerProc(&ping_timer, 22, send_ping);
 	reconnect_fails = 0;
 	watch_last = bt_panu_rx_count();
-	watch_idle = watch_beats = 0;
+	watch_idle = 0;
 	GBS_StartTimerProc(&watch_timer, WATCH_TICKS, rx_watch);
 }
 
@@ -302,56 +280,19 @@ static struct bt_pan_netif_config netif_config = {
 
 static void pan_stopped(void);
 
-#if BT_PAN_TRACE
-const char *volatile trace_where = "start";
-const unsigned trace_btpan_cepid = BT_PANU_PROCESS_CEPID;
-volatile unsigned trace_where_arg, trace_where_cepid, trace_where_seq;
-#endif
-
-static void process_messages_(void);
-
 static void process_messages(void) {
-	WHERE("P recv", 0);
-	PROF_IN(PROF_BTPAN);
-	process_messages_();
-	PROF_OUT(PROF_BTPAN);
-	WHERE("P idle", 0);
-}
-
-static void process_messages_(void) {
-	static int traced;
 	GBS_MSG msg;
 
-	if (traced < 40) trace("P enter");
-	if (!GBS_RecActDstMessage(&msg)) {
-		if (traced < 40) trace("P no message");
+	if (!GBS_RecActDstMessage(&msg))
 		return;
-	}
 	if (GBS_MSG_ID(msg.msg) == GBS_MSG_ID(BT_PANU_MESSAGE_RX)) {
-		bt_panu_rx_event(&panu); /* the hot path: no logging */
+		bt_panu_rx_event(&panu); /* the hot path */
 		return;
 	}
 	if (GBS_MSG_ID(msg.msg) == GBS_MSG_ID(BT_PANU_MESSAGE_TX)) {
 		bt_pan_netif_tx_event(&netif); /* hot path too: ACKs */
 		return;
 	}
-#if BT_PAN_TRACE
-	if (traced < 40) {
-		char t[48];
-		++traced;
-		sprintf(t, "P msg %X from %X", (unsigned)msg.msg, (unsigned)msg.pid_from);
-		trace(t);
-	}
-#endif
-
-	if (BT_PAN_USART_LOG) {
-		sprintf(log_buf, "GBS: from=%04X msg=%08X sub=%08X data0=%p data1=%p\r\n",
-				(unsigned int)msg.pid_from, (unsigned int)msg.msg, (unsigned int)msg.submess, msg.data0,
-				msg.data1);
-		usart_puts(log_buf);
-	}
-
-	WHERE("P msg", (unsigned)(uint16_t)msg.msg);
 	switch (GBS_MSG_ID(msg.msg)) {
 		case GBS_MSG_ID(BT_PANU_MESSAGE_INIT):
 			peers_stop(); /* never two accessors of ours at once */
@@ -366,7 +307,6 @@ static void process_messages_(void) {
 		case GBS_MSG_ID(BT_PANU_MESSAGE_PEERS_START):
 			if (!pan_running)
 				peers_start(BT_PANU_PROCESS_CEPID, BT_PANU_MESSAGE_PEERS_BTA);
-			trace("P peers started");
 			break;
 		case GBS_MSG_ID(BT_PANU_MESSAGE_PEERS_STOP):
 			peers_stop();
@@ -420,18 +360,14 @@ static int create_process(void) {
 	};
 #endif
 
-	if (GetGBSProcAddress(BT_PANU_PROCESS_CEPID)) {
-		usart_puts("BTPAN CEPID 1A00 is already running\r\n");
-		return 0;
-	}
+	if (GetGBSProcAddress(BT_PANU_PROCESS_CEPID))
+		return 0; /* BTPAN 1A00 is already running */
 
 	if (!GetProcGroup(BT_PANU_PROCESS_CEPID))
 		CreateICL(&group);
 	CreateGBSproc(BT_PANU_PROCESS_CEPID, "BTPAN", process_messages, 0x80, 0);
-	if (!GetGBSProcAddress(BT_PANU_PROCESS_CEPID)) {
-		usart_puts("Cannot create BTPAN GBS process\r\n");
+	if (!GetGBSProcAddress(BT_PANU_PROCESS_CEPID))
 		return 0;
-	}
 	process_created = true;
 	return 1;
 }
@@ -442,7 +378,6 @@ static void begin_shutdown(GBSTMR *timer) {
 		return;
 
 	shutdown_started = true;
-	usart_puts("BT PAN: shutting down\r\n");
 	speedtest_direct_cancel();
 	ping_stop();
 	if (IsTimerProc(&ping_timer))
@@ -479,10 +414,10 @@ static void pan_stopped(void) {
 	reconnect_wait = false;
 	auto_restart = false;
 	pan_running = false;
-	usart_puts("BT PAN: stopped\r\n");
 
-	/* UI mode: BT is fully down; stay on screen for a new connection unless the user asked
-	 * to leave (then the UI closes from MMI context and its onclose kills the process+elf). */
+	/* UI mode: BT is fully down; stay for a new connection unless the user asked to leave
+	 * (then the daemon CSM's poll closes the screen and the daemon, whose onclose kills the
+	 * process and the elf from MMI context). */
 	if (ui_active) {
 		if (exit_after_stop)
 			ui_exit_requested = true;
@@ -494,7 +429,6 @@ static void pan_stopped(void) {
 		process_created = false;
 	}
 
-	usart_puts("BT PANU: kill_elf\r\n");
 	kill_elf();
 }
 
@@ -522,10 +456,7 @@ static void finish_poc(GBSTMR *timer) {
 		unsigned d = delay_s[reconnect_fails < 4 ? reconnect_fails : 4];
 
 		auto_restart = false;
-		++auto_restarts;
 		++reconnect_fails;
-		sprintf(log_buf, "BT PAN: reconnect #%u in %u s\r\n", auto_restarts, d);
-		usart_puts(log_buf);
 		reconnect_wait = true;
 		GBS_StartTimerProc(&reconnect_timer, 216 * d, reconnect_now);
 		return;
@@ -543,27 +474,19 @@ static int AppStartPan(void) {
 
 /* Re-inits the stacks each time so a stop/start cycle is clean. */
 static int pan_start(void) {
-	if (!addr_ok) {
-		usart_puts("BT PAN: no PC address in BTPAN.bcfg\r\n");
-		return -1;
-	}
-	if (hooks_patch_state() == PATCH_OLD) {
-		usart_puts("BT PAN: old hooks VKP in flash (no WSP availability hook): "
-				   "install the one from the release patches\r\n");
-		return -1;
-	}
+	if (!addr_ok)
+		return -1; /* no PC address in BTPAN.bcfg */
+	if (hooks_patch_state() == PATCH_OLD)
+		return -1; /* old hooks VKP in flash (no WSP availability hook) */
 	memcpy(&netif_config.local_ip, local_ipv4, sizeof(netif_config.local_ip));
 	memcpy(&netif_config.dns1, dns1_ipv4, sizeof(netif_config.dns1));
 	memcpy(&netif_config.dns2, dns2_ipv4, sizeof(netif_config.dns2));
 	bt_panu_init(&panu, &panu_config);
 	bt_pan_netif_init(&netif, &netif_config);
-	if (!GetGBSProcAddress(BT_PANU_PROCESS_CEPID) && !create_process()) {
-		usart_puts("BT PAN: cannot create BTA process\r\n");
+	if (!GetGBSProcAddress(BT_PANU_PROCESS_CEPID) && !create_process())
 		return -1;
-	}
 	shutdown_started = false;
 	pan_running = true;
-	usart_puts("BT PAN: start\r\n");
 	GBS_SendMessage(BT_PANU_PROCESS_CEPID, BT_PANU_MESSAGE_INIT, 0, 0, 0);
 	GBS_StartTimerProc(&shutdown_timer, 216 * BT_PANU_RUN_SECONDS, session_timeout);
 	return 0;
@@ -585,22 +508,28 @@ static void AppStopPan(void) {
 #endif
 
 /* Another copy of the elf is loaded: its BTA helper process (made at start, both builds, gone
- * only when that copy unloads) or its screen CSM ("BT PAN", after its CSM_DESC as ours). Two
- * copies would share the process, the SDev slots and the ENIP interface. */
+ * only when that copy unloads) or one of its CSMs ("BT PAN" screen, "BT PAN (link)" daemon,
+ * after its CSM_DESC as ours). Two copies would share the process, the SDev slots and the ENIP
+ * interface. */
 static int AnotherRunning(void) {
+	static const char *const names[] = {"BT PAN", "BT PAN (link)"};
 	CSM_RAM *c;
 	if (GetGBSProcAddress(BT_PANU_PROCESS_CEPID))
 		return 1;
 	for (c = CSM_root()->csm_q->csm.first; c; c = c->next) {
 		const WSHDR *ws = (const WSHDR *)((const char *)c->constr + sizeof(CSM_DESC));
-		static const char name[] = "BT PAN";
-		int i, len = (int)sizeof(name) - 1;
+		unsigned k;
 		if ((uint32_t)ws->ws_malloc != (uint32_t)NAMECSM_MAGIC1 ||
-			(uint32_t)ws->ws_mfree != (uint32_t)NAMECSM_MAGIC2 || ws->wsbody[0] != len)
+			(uint32_t)ws->ws_mfree != (uint32_t)NAMECSM_MAGIC2)
 			continue;
-		for (i = 0; i < len && ws->wsbody[i + 1] == (uint16_t)name[i]; ++i) {}
-		if (i == len)
-			return 1;
+		for (k = 0; k < sizeof(names) / sizeof(names[0]); ++k) {
+			int i, len = (int)strlen(names[k]);
+			if (ws->wsbody[0] != len)
+				continue;
+			for (i = 0; i < len && ws->wsbody[i + 1] == (uint16_t)names[k][i]; ++i) {}
+			if (i == len)
+				return 1;
+		}
 	}
 	return 0;
 }
@@ -610,46 +539,33 @@ int main(char *exe, char *fname, void *p1) {
 	(void)fname;
 	(void)p1;
 
-	trace("--- start " BT_PAN_BUILD_TAG);
-	if (AnotherRunning()) { /* before anything that touches the running copy's state (USART) */
+	if (AnotherRunning()) { /* before anything that touches the running copy's state */
 		/* the running copy brings its screen up (app_ui.h), this one goes quietly */
 		GBS_SendMessage(MMI_CEPID, BT_PAN_MSG_SHOW, BT_PAN_MSG_MAGIC, 0, 0);
 		SUBPROC((void *)kill_elf);
 		return 0;
 	}
-	trace("1 single instance ok");
-	usart_init();
-	usart_set_speed(115200);
-	trace("2 usart");
-	usart_puts("\r\n--- BT PAN ENIP " BT_PAN_BUILD_TAG " ---\r\n");
 	if (lib_check()) {
-		usart_puts("BT PAN: function library has no entries for this elf\r\n");
 		ShowMSG(1, (int)"BT PAN: install the function library from the release patches");
 		SUBPROC((void *)kill_elf);
 		return 0;
 	}
-	trace("4 library ok");
 #ifdef SGOLD
 	if (bt_sg_mtu_patched()) {
 		panu_config.rx_mtu = panu_config.tx_mtu = BT_BNEP_MIN_MTU;
 		bt_pan_tx_max = BT_PAN_SG_BIG_IP_MTU;
 		netif_config.mtu = BT_PAN_SG_BIG_STACK_MTU;
-		usart_puts("BT PAN: MTU patch found, L2CAP 1691\r\n");
 	}
 #endif
 	pan_lman_init(); /* socket helper registration, so apps' contexts can be pinned */
-	trace("5 lman init");
 
 	config_load();
-	trace("6 config");
 
 #if BT_PAN_UI
 	ui_active = true;
 	if (!GetGBSProcAddress(BT_PANU_PROCESS_CEPID))
 		create_process(); /* the device list needs it before the first connection */
-	trace("7 process");
-	AppCreateUI();      /* on/off screen; PAN starts from the toggle */
-	trace("8 ui created");
+	AppCreateUI();      /* daemon CSM below idle + on/off screen; PAN starts from the toggle */
 #else
 	AppStartPan();      /* headless: start now, off = kill_elf (proven path) */
 #endif

@@ -80,7 +80,7 @@
 
 ## Сборка
 
-SDK ElfLoader 3 [dm468/sdk](https://github.com/dm468/sdk) в `../sdk` относительно `source/`. Затем:
+SDK ElfLoader 3: оригинал [siemens-mobile-hacks/sdk](https://github.com/siemens-mobile-hacks/sdk); для сборки нужен изменённый форк [dm468/sdk](https://github.com/dm468/sdk) (добавлены нужные bt-pan прототипы SWI для BT/LMAN/ENIP/сокетов), склонированный в `../sdk` относительно `source/`. Затем:
 
 ```sh
 cd source && cmake -B build -S . && cmake --build build

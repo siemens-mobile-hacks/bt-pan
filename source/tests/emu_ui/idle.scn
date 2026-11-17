@@ -1,0 +1,9 @@
+# idle check: connect, stay connected and idle on the main screen, then minimized; see 4:\uipolls.txt
+wait 2
+key enter
+wait 14
+shot i1_connected_idle
+wait 6
+key red
+wait 6
+shot i2_minimized

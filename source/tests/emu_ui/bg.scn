@@ -1,0 +1,23 @@
+# D153: the firmware's DoIDLE (camera key in ui_demo) closes the screen CSM while connected; the
+# daemon (below idle) and the link stay; started again (side key) -> screen back; once more; Exit ->
+# disconnect, screen + daemon closed. Checked by bg.sh. (Red = minimize is an MMI command that
+# elfloader3-linux does not run: not tested here.)
+wait 2
+key enter
+wait 3
+shot b1_connected
+key camera
+wait 4
+shot b2_idle
+key side
+wait 2
+shot b3_back
+key camera
+wait 2
+key side
+wait 2
+shot b4_top_again
+key rsoft
+wait 4
+shot b5_exit
+wait 2

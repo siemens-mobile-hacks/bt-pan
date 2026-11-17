@@ -78,7 +78,7 @@ or in the BCFG editor: `zbin\etc\BTPAN.bcfg`.
 
 ## Building
 
-ElfLoader 3 SDK [dm468/sdk](https://github.com/dm468/sdk) in `../sdk` relative to `source/`. Then:
+ElfLoader 3 SDK: original [siemens-mobile-hacks/sdk](https://github.com/siemens-mobile-hacks/sdk); this build uses the modified fork [dm468/sdk](https://github.com/dm468/sdk) (adds the BT/LMAN/ENIP/socket SWI prototypes bt-pan needs), cloned to `../sdk` relative to `source/`. Then:
 
 ```sh
 cd source && cmake -B build -S . && cmake --build build

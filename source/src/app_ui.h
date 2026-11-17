@@ -22,7 +22,6 @@
 #include <swilib.h>
 #include <stdint.h>
 #include <stdio.h>
-#include "prof.h"
 
 typedef struct { CSM_RAM csm; int gui_id; } MAIN_CSM;
 
@@ -30,10 +29,16 @@ typedef struct { CSM_RAM csm; int gui_id; } MAIN_CSM;
 #define UI_POLL_SLOW 216u       /* 1 s otherwise (connected and idle, minimized, under a message) */
 #define UI_LIVE_TICKS 216u      /* counters/speeds on screen at most once a second */
 #define BT_PAN_SCREEN_NAME "BT PAN"
+#define BT_PAN_DAEMON_NAME "BT PAN (link)" /* no GUI, below idle */
 
-static MAIN_CSM *main_csm;
+static MAIN_CSM *main_csm;     /* the screen CSM, NULL when closed (the link stays up) */
+static CSM_RAM *dmn_csm;       /* the daemon CSM (below idle), NULL once closed */
+static int dmn_id;
+static bool quitting;          /* Exit: the screen closes, then the daemon, then the elf */
+static unsigned quit_ticks;
+static bool scr_reopen_hidden, scr_hide; /* D154: closed by DoIDLE -> made again below idle (XTask lists it) */
+static bool scr_pending;       /* the screen's CreateCSM was asked for (NSG: an MMI command, run later) */
 static GBSTMR ui_timer;
-static unsigned ui_polls;
 static unsigned ui_interval;   /* period the timer is armed with */
 static unsigned ui_ticks;      /* sum of the periods: the poll's clock */
 static unsigned ui_live_at;    /* ui_ticks of the last counter/speed update */
@@ -46,10 +51,10 @@ static const unsigned ping_sizes[] = {56, 512, 1472};
 /* traffic speed, once a second from the poll */
 static uint32_t rate_last_rx, rate_last_tx;
 static unsigned rate_rx, rate_tx;
-static unsigned diag_win_low = 0xffffu; /* lowest window of our ACKs in the last second */
 
 static void AppExit(void);
 static void AppMinimize(void);
+static void scr_open(void);
 
 /* ------------------------------------------------------------------------- formatting */
 
@@ -119,7 +124,7 @@ static SCREEN scr[SCR_N];
 
 enum {
 	M_CONNECT, M_STATUS, M_HINT, M_PC, M_AUTO, M_IP, M_GW, M_DNS, M_MTU, M_RX, M_TX,
-	M_D_WIN, M_D_RX, M_D_TX, M_D_POOL, M_D_RING, M_TEST, M_PING, M_MIN, M_EXIT
+	M_TEST, M_PING, M_MIN, M_EXIT
 };
 enum { T_BTN0, T_RUN0, T_DL0, T_UL0, T_BTN1, T_RUN1, T_DL1, T_UL1, T_HINT };
 enum { P_BTN, P_SIZE, P_TO, P_ERR, P_LAST, P_REPLIES, P_LOST, P_AVG, P_MINMAX, P_HIST };
@@ -137,7 +142,6 @@ static int Rows(int s, unsigned char *r) {
 				r[n++] = M_MTU;
 			}
 			r[n++] = M_RX; r[n++] = M_TX;
-			if (Online()) { r[n++] = M_D_WIN; r[n++] = M_D_RX; r[n++] = M_D_TX; r[n++] = M_D_POOL; r[n++] = M_D_RING; }
 			r[n++] = M_TEST; r[n++] = M_PING; r[n++] = M_MIN;
 			r[n++] = M_EXIT;
 			break;
@@ -192,15 +196,6 @@ static void Sig(int s, unsigned *st, unsigned *live) {
 			}
 			MIX(b, bt_pan_rx_bytes / 100u); MIX(b, bt_pan_tx_bytes / 100u);
 			MIX(b, rate_rx / 100u); MIX(b, rate_tx / 100u);
-			if (Online()) {
-				struct bt_panu_diag d;
-				bt_panu_diag(&d);
-				MIX(b, bt_pan_diag.win_last); MIX(b, diag_win_low); MIX(b, bt_pan_diag.win_zero);
-				MIX(b, bt_pan_diag.alloc_fail); MIX(b, bt_pan_diag.retx); MIX(b, bt_pan_diag.tx_fail);
-				MIX(b, bt_pan_diag.tx_retry_ok); MIX(b, bt_pan_diag.pool_max);
-				MIX(b, bt_pan_diag_pool_used() / 100u); MIX(b, bt_pan_diag_sock_rx_used() / 100u);
-				MIX(b, d.dropped); MIX(b, d.refused); MIX(b, d.ring_max / 100u); MIX(b, d.tx_pool_min);
-			}
 			break;
 		case SCR_TEST:
 			for (i = 0; i < 2; ++i) {
@@ -277,42 +272,6 @@ static void MainItem(void *gui, int item_n, void *user) {
 				l = strlen(b);
 				snprintf(b + l, sizeof(b) - l, ", %s", v);
 			}
-			break;
-		}
-		/* D138 counters, since Connect: window of our ACKs (last, lowest in the last second,
-		 * zero-window count); RX losses; TX refusals by the BT send buffers; ENIP bytes */
-		case M_D_WIN:
-			if (diag_win_low == 0xffffu) snprintf(v, sizeof(v), "-");
-			else snprintf(v, sizeof(v), "%u", diag_win_low);
-			snprintf(b, sizeof(b), "Win %u low %s z%lu", (unsigned)bt_pan_diag.win_last, v,
-					 (unsigned long)bt_pan_diag.win_zero);
-			break;
-		case M_D_RX: {
-			struct bt_panu_diag d;
-			bt_panu_diag(&d);
-			snprintf(b, sizeof(b), "Drop %lu/%lu retx %lu", (unsigned long)d.dropped,
-					 (unsigned long)bt_pan_diag.alloc_fail, (unsigned long)bt_pan_diag.retx);
-			break;
-		}
-		case M_D_TX: {
-			struct bt_panu_diag d;
-			bt_panu_diag(&d);
-			snprintf(b, sizeof(b), "TXf %lu ok%lu x%lu BT%lu/%u",
-					 (unsigned long)bt_pan_diag.tx_fail, (unsigned long)bt_pan_diag.tx_retry_ok,
-					 (unsigned long)bt_pan_diag.tx_retry_lost, (unsigned long)d.tx_pool_min,
-					 (unsigned)panu.pool_tx_base);
-			break;
-		}
-		case M_D_POOL: {
-			snprintf(b, sizeof(b), "Pool %u/%lu s%u", bt_pan_diag_pool_used(),
-					 (unsigned long)bt_pan_diag.pool_max, bt_pan_diag_sock_rx_used());
-			break;
-		}
-		case M_D_RING: {
-			struct bt_panu_diag d;
-			bt_panu_diag(&d);
-			snprintf(b, sizeof(b), "Ring %lu held %lu", (unsigned long)d.ring_max,
-					 (unsigned long)d.refused);
 			break;
 		}
 		case M_TEST: ItemText(gui, item_n, "Speed test..."); return;
@@ -612,7 +571,6 @@ static void ConnectToggle(void) {
 		ShowMSG(1, (int)"Undo the old hook patch and install the new one");
 	} else if (addr_ok) {
 		bt_pan_rx_bytes = bt_pan_tx_bytes = 0;
-		bt_pan_diag_reset();
 		rate_last_rx = rate_last_tx = 0;
 		rate_rx = rate_tx = 0;
 		AppStartPan();
@@ -681,12 +639,14 @@ static void UiClose(void) {
 	else if (main_csm) main_csm->csm.state = CSM_STATE_CLOSED;
 }
 
+static void AppQuit(void);
+
 /* "Exit": disconnect first if needed (our SDev app must leave the stack's table before the
- * elf unloads); finish_poc then sets ui_exit_requested. */
+ * elf unloads); finish_poc then sets ui_exit_requested and the daemon's poll quits. */
 static void AppExit(void) {
 	speedtest_stack_cancel();
 	if (pan_running) { exit_after_stop = true; AppStopPan(); return; }
-	UiClose();
+	AppQuit();
 }
 
 /* Fast polling only while one of our screens is on top and something is changing on its own
@@ -698,7 +658,7 @@ static bool UiFast(void) {
 		if (scr[s].id && IsGuiOnTop(scr[s].id)) top = 1;
 	if (!top) return false;
 	return Busy() || reconnect_wait || (pan_running && !Online()) || peers_busy || speedtest_running() ||
-		   ui_exit_requested;
+		   ui_exit_requested || quitting;
 }
 
 static void UiPoll(GBSTMR *timer);
@@ -711,32 +671,29 @@ static void UiArm(unsigned ticks) {
 
 /* after a key action: a transition just began, follow it at the fast rate */
 static void UiKick(void) {
-	if (!ui_in_poll && main_csm && ui_interval != UI_POLL_FAST && UiFast()) UiArm(UI_POLL_FAST);
+	if (!ui_in_poll && dmn_csm && ui_interval != UI_POLL_FAST && UiFast()) UiArm(UI_POLL_FAST);
 }
 
-/* MMI timer: only compares numbers; texts are made by the firmware's redraw of the menu on top,
- * and only after a change. */
+/* MMI timer of the daemon CSM (runs with or without the screen): only compares numbers; texts
+ * are made by the firmware's redraw of the menu on top, and only after a change. Exit: the screen
+ * goes first, then the daemon (its onclose kills the process and the elf). */
 static void UiPoll(GBSTMR *timer) {
 	int s, live_due;
 	(void)timer;
-	++ui_polls;
 	ui_ticks += ui_interval;
 	live_due = ui_ticks - ui_live_at >= UI_LIVE_TICKS;
-#if BT_PAN_TRACE
-	{ /* each ~1 s from MMI: where our code was last (see trace.h) */
-		static unsigned lines, last_seq = ~0u, same;
-		char t[96];
-
-		if (live_due && lines < 500 && (trace_where_seq != last_seq || ++same % 5 == 0)) {
-			++lines;
-			sprintf(t, "W %u seq=%u %s %X in %X", ui_polls, trace_where_seq, trace_where,
-					trace_where_arg, trace_where_cepid);
-			trace(t);
-			last_seq = trace_where_seq;
-		}
+	if (ui_exit_requested) { ui_exit_requested = false; AppQuit(); }
+	if (quitting) {
+		if (main_csm && ++quit_ticks <= 8) { UiArm(UI_POLL_FAST); return; } /* <= 2 s for the screen */
+		if (dmn_csm) CloseCSM(dmn_id);
+		return;
 	}
-#endif
-	if (ui_exit_requested) { ui_exit_requested = false; UiClose(); return; }
+	if (scr_hide && main_csm) { scr_hide = false; AppMinimize(); }
+	if (scr_reopen_hidden && !main_csm && !scr_pending) {
+		scr_reopen_hidden = false;
+		scr_hide = true;
+		scr_open();
+	}
 	if (!pan_running && speedtest[SPEEDTEST_STACK].state == SPT_RUN) speedtest_stack_cancel();
 	if (live_due) {
 		uint32_t rx = bt_pan_rx_bytes, tx = bt_pan_tx_bytes;
@@ -746,8 +703,6 @@ static void UiPoll(GBSTMR *timer) {
 		rate_last_rx = rx;
 		rate_last_tx = tx;
 		ui_live_at = ui_ticks;
-		diag_win_low = bt_pan_diag.win_low;
-		bt_pan_diag.win_low = 0xffffu;
 	}
 	ui_in_poll = true;
 	for (s = 0; s < SCR_N; ++s) {
@@ -761,46 +716,41 @@ static void UiPoll(GBSTMR *timer) {
 	UiArm(UiFast() ? UI_POLL_FAST : UI_POLL_SLOW);
 }
 
-static void maincsm_oncreate(CSM_RAM *data) {
+/* Two CSMs (D153, as radio D92 / btfiles D16). The firmware closes every CSM above the idle one
+ * on DoIDLE: the red key on another screen (A0959400), a call dialled from a firmware number
+ * screen, S65 going to sleep. One CSM with the screen and the link died that way, and the BT
+ * internet with it. Now:
+ *  - the daemon CSM: no GUI, made right above csm.first (below idle, out of DoIDLE's reach); it
+ *    owns the poll timer, the broadcast MMI messages (second start, BCFG editor, the stack speed
+ *    test's sockets) and the exit; its onMessage always returns 1 (0x6401 idle timer ignored);
+ *    only "Exit" closes it (the PAN link, the BTPAN process and the ENIP netif live outside any
+ *    CSM anyway: their messages go to the 1A00 process, sockets to ElfLoader's helper);
+ *  - the screen CSM: the menus; may be closed by anyone at any time, the link stays; starting
+ *    the elf again opens it again (or moves it to the top). Red key in it = minimize. */
+
+static void scr_oncreate(CSM_RAM *data) {
 	MAIN_CSM *csm = (MAIN_CSM *)data;
-	trace("C csm oncreate");
 	main_csm = csm;
+	scr_pending = false;
 	csm->csm.state = CSM_STATE_OPEN;
 	csm->csm.unk1 = 0;
-	ui_tmp = AllocWS(64);
-	ui_patch = hooks_patch_state();
+	if (!ui_tmp) ui_tmp = AllocWS(64);
 	zeromem(scr, sizeof(scr));
 	Open(SCR_MAIN);
 	csm->gui_id = scr[SCR_MAIN].id;
-	ui_ticks = ui_live_at = 0;
-	UiArm(UI_POLL_FAST);
-	prof_start(); /* SG trace builds: CPU per process (prof.h) */
-	trace("C csm open");
+	if (dmn_csm && !quitting) UiArm(UI_POLL_FAST);
 }
 
-static void maincsm_onclose(CSM_RAM *data) {
+/* closed by Exit or from outside (DoIDLE): only the menus go; PAN, the daemon and its timer stay */
+static void scr_onclose(CSM_RAM *data) {
 	(void)data;
-	prof_stop();
-	if (IsTimerProc(&ui_timer)) GBS_StopTimer(&ui_timer);
+	if (scr[SCR_PICK].id && !quitting)
+		GBS_SendMessage(BT_PANU_PROCESS_CEPID, BT_PANU_MESSAGE_PEERS_STOP, 0, 0, 0);
 	main_csm = NULL;
+	scr_pending = false;
+	if (!quitting) { scr_reopen_hidden = true; if (dmn_csm) UiArm(UI_POLL_FAST); } /* D154: back hidden */
 	zeromem(scr, sizeof(scr));
 	if (ui_tmp) { FreeWS(ui_tmp); ui_tmp = NULL; }
-	speedtest_stack_cancel();
-	/* Closed from outside while PAN runs: our SDev app is still in the stack's table, so the
-	 * elf must not unload yet. Stop like the headless build: finish_poc kills the BTA process
-	 * and the elf once BT is down and the app is restored. */
-	if (pan_running) {
-		ui_active = false;
-		AppStopPan();
-		return;
-	}
-	/* the device-list accessor and the BTA helper process must go before the elf unloads */
-	if (process_created && GetGBSProcAddress(BT_PANU_PROCESS_CEPID)) {
-		peers_stop(); /* a queued message would die with the process */
-		KillGBSproc(BT_PANU_PROCESS_CEPID);
-		process_created = false;
-	}
-	kill_elf();
 }
 
 /* Move a CSM: an MMI command (as XTask's CSMtoTop, sieelf/MySMSYS CSMswaper.c), but simpler:
@@ -888,13 +838,8 @@ static void AppMinimize(void) {
 	if (main_csm) csm_move(main_csm->csm.id, CSM_root()->idle_id);
 }
 
-static int maincsm_onmessage(CSM_RAM *data, GBS_MSG *msg) {
+static int scrcsm_onmessage(CSM_RAM *data, GBS_MSG *msg) {
 	MAIN_CSM *csm = (MAIN_CSM *)data;
-	if (GBS_MSG_ID(msg->msg) == GBS_MSG_ID(BT_PAN_MSG_SHOW) && msg->submess == BT_PAN_MSG_MAGIC) { /* started again */
-		usart_puts("BT PAN: started again, screen to the top\r\n");
-		csm_to_top(csm->csm.id);
-		return 1;
-	}
 	if (msg->msg == MSG_GUI_DESTROYED) {
 		int s;
 		for (s = SCR_MAIN + 1; s < SCR_N; ++s)
@@ -904,30 +849,25 @@ static int maincsm_onmessage(CSM_RAM *data, GBS_MSG *msg) {
 			csm->csm.state = CSM_STATE_CLOSED;
 		}
 	}
-	if (msg->msg == MSG_RECONFIGURE_REQ && msg->data0 && !strcmpi(msg->data0, cfg_path)) {
-		config_load(); /* edited in the BCFG editor; a running link keeps its address */
-		Sync(SCR_MAIN);
-	}
-	speedtest_stack_msg(msg);
 	return 1;
 }
 
 static void UiIconBar(short *num) { (void)num; } /* no taskbar icon */
 
 static const int ui_minus11 = -11;
-static uint16_t maincsm_name_body[32];
+static uint16_t maincsm_name_body[32], dmncsm_name_body[32];
 static struct {
 	CSM_DESC desc;
 	WSHDR name;
 	struct { char tag[8]; void (*cb)(short *); } iconbar;
 } MAINCSM = {
 	.desc = {
-		maincsm_onmessage,
-		maincsm_oncreate,
+		scrcsm_onmessage,
+		scr_oncreate,
 #ifdef NEWSGOLD
 		0, 0, 0, 0,
 #endif
-		maincsm_onclose,
+		scr_onclose,
 		sizeof(MAIN_CSM),
 		1, &ui_minus11
 	},
@@ -935,9 +875,126 @@ static struct {
 	.iconbar = { "IconBar", UiIconBar }
 };
 
-static void AppCreateUI(void) {
+/* the screen on top: made if closed, else moved there */
+static void scr_open(void) {
 	MAIN_CSM storage;
+	CSMQ *q = CSM_root()->csm_q;
+	CSM_RAM *save;
+	if (main_csm) { csm_to_top(main_csm->csm.id); return; }
+	if (scr_pending || quitting) return;
+	scr_pending = true; /* NSG: CreateCSM is an MMI command, run later */
 	zeromem(&storage, sizeof(storage));
 	wsprintf(&MAINCSM.name, BT_PAN_SCREEN_NAME);
+	/* the new CSM goes right above the one handling the current message (A0A149B6): from the
+	 * daemon's onMessage that is below idle, so above the top one */
+	save = q->current_msg_processing_csm;
+	q->current_msg_processing_csm = q->csm.last;
 	CreateCSM(&MAINCSM.desc, &storage, 0);
+#ifndef BT_PAN_EMU /* elfloader3 keeps "current" = the last CSM made and gives it every new GUI */
+	q->current_msg_processing_csm = save;
+#else
+	(void)save;
+#endif
+}
+
+/* Exit (no link any more): the screen goes, then the daemon (UiPoll), then the elf (quit_wait) */
+static void AppQuit(void) {
+	if (quitting) return;
+	quitting = true;
+	quit_ticks = 0;
+	UiClose();
+	if (dmn_csm) UiArm(UI_POLL_FAST);
+}
+
+/* after the daemon closed: the elf goes once the link is down (our SDev app out of the stack's
+ * table, finish_poc done) and the screen CSM is gone (its code must still be there) */
+static GBSTMR quit_timer;
+static void quit_wait(GBSTMR *timer) {
+	(void)timer;
+	if (pan_running || main_csm) {
+		if (main_csm && ++quit_ticks > 16) main_csm->csm.state = CSM_STATE_CLOSED;
+		GBS_StartTimerProc(&quit_timer, UI_POLL_FAST, quit_wait);
+		return;
+	}
+	/* the device-list accessor and the BTA helper process must go before the elf unloads */
+	if (process_created && GetGBSProcAddress(BT_PANU_PROCESS_CEPID)) {
+		peers_stop(); /* a queued message would die with the process */
+		KillGBSproc(BT_PANU_PROCESS_CEPID);
+		process_created = false;
+	}
+	kill_elf();
+}
+
+/* Exit, or closed by anyone else (then PAN is stopped here: nothing but Exit should get here) */
+static void dmn_onclose(CSM_RAM *data) {
+	(void)data;
+	dmn_csm = NULL;
+	quitting = true;
+	if (IsTimerProc(&ui_timer)) GBS_StopTimer(&ui_timer);
+	UiClose();
+	speedtest_stack_cancel();
+	if (pan_running) { exit_after_stop = true; AppStopPan(); }
+	quit_ticks = 0;
+	quit_wait(NULL);
+}
+
+static void dmn_oncreate(CSM_RAM *data) {
+	dmn_csm = data;
+	dmn_id = data->id;
+	data->state = CSM_STATE_OPEN;
+	data->unk1 = 0;
+	ui_patch = hooks_patch_state();
+	ui_ticks = ui_live_at = 0;
+	UiArm(UI_POLL_FAST);
+}
+
+static int dmn_onmessage(CSM_RAM *data, GBS_MSG *msg) {
+	(void)data;
+	if (GBS_MSG_ID(msg->msg) == GBS_MSG_ID(BT_PAN_MSG_SHOW) && msg->submess == BT_PAN_MSG_MAGIC) { /* started again */
+		scr_reopen_hidden = scr_hide = false; /* D154: shown, not hidden */
+		scr_open();
+		return 1;
+	}
+	if (msg->msg == MSG_RECONFIGURE_REQ && msg->data0 && !strcmpi(msg->data0, cfg_path)) {
+		config_load(); /* edited in the BCFG editor; a running link keeps its address */
+		Sync(SCR_MAIN);
+	}
+	speedtest_stack_msg(msg);
+	return 1; /* never closes by itself (MSG_IDLETMR_EXPIRED 0x6401 too) */
+}
+
+static struct {
+	CSM_DESC desc;
+	WSHDR name;
+} DMNCSM = {
+	.desc = {
+		dmn_onmessage,
+		dmn_oncreate,
+#ifdef NEWSGOLD
+		0, 0, 0, 0,
+#endif
+		dmn_onclose,
+		sizeof(CSM_RAM),
+		1, &ui_minus11
+	},
+	.name = { dmncsm_name_body, NAMECSM_MAGIC1, NAMECSM_MAGIC2, 0x0, 31, 0 },
+};
+
+/* main(): the daemon at the bottom of the CSM list (as radio / btfiles / cpumon), then the
+ * screen on top. Returns the daemon's id. */
+static int AppCreateUI(void) {
+	CSM_RAM storage, *save;
+	CSMQ *q;
+	int id;
+	zeromem(&storage, sizeof(storage));
+	wsprintf(&DMNCSM.name, BT_PAN_DAEMON_NAME);
+	LockSched();
+	q = CSM_root()->csm_q;
+	save = q->current_msg_processing_csm;
+	q->current_msg_processing_csm = q->csm.first;
+	id = CreateCSM(&DMNCSM.desc, &storage, 0);
+	q->current_msg_processing_csm = save;
+	UnlockSched();
+	scr_open();
+	return id;
 }

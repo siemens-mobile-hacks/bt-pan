@@ -89,7 +89,7 @@ static inline int bt_sg_fw(void) {
 	}
 }
 
-/* bt-pan-mtu_S65v58.vkp / bt-pan-mtu_SK65v50.vkp: LDAEstReq accepts MTUs up to 0x6A0
+/* bt-pan-mtu_S65v58.vkp / _SK65v50.vkp: LDAEstReq accepts MTUs up to 0x6A0
  * ("movs r7,#0xD4; lsls r7,#3"); this tests for the patch, it calls nothing. */
 static inline int bt_sg_mtu_patched(void) {
 	uint32_t site;
@@ -100,15 +100,6 @@ static inline int bt_sg_mtu_patched(void) {
 	default: return 0;
 	}
 	return *(const volatile uint32_t *)site == 0x00FF27D4u;
-}
-
-/* trace builds only: the DNS module state (4 query slots of 0x34 at +0x80); 0 = unknown */
-static inline uint32_t bt_sg_dns_state(void) {
-	switch (bt_sg_fw()) {
-	case SG_FW_S65V58: return 0xA876D400u;
-	case SG_FW_SK65V50: return 0xA8F16CB4u;
-	default: return 0;
-	}
 }
 
 static inline const uint8_t *bt_sg_local_addr(void) {
