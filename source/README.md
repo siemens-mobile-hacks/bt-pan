@@ -10,7 +10,7 @@
 cmake -B build -S . && cmake --build build
 ```
 Получаются `build/bt-pan_ELKA.elf` (EL71/E71 sw45), `build/bt-pan_SG.elf` (S65 sw58, SK65 sw50),
-`build/bt-pan_NSG.elf` (S75 sw52) и `bt-pan_ELKA_P60.elf` (процесс BTPAN с приоритетом 0x60, для сравнения).
+`build/bt-pan_NSG.elf` (S75 sw52).
 Один исходник, отличия под `#ifdef SGOLD`. Логов, трассы и отладочных счётчиков нет (D152).
 
 ## Экран

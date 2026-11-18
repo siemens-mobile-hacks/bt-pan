@@ -358,7 +358,8 @@ static int create_process(void) {
 	static PGROUP group = {BT_PANU_PROCESS_GROUP, 0x60, 0x4000, 2};
 #else
 #ifndef BT_PAN_ELKA_PRIO
-#define BT_PAN_ELKA_PRIO 0x80
+#define BT_PAN_ELKA_PRIO 0x60 /* was 0x80 = lowest of all: starved behind the ElfLoader helper (110)
+				  * while a radio decoded = BTPAN silent, Disconnect ignored, phone hang (bt-pan-fw 2026-11-18) */
 #endif
 	static PGROUP group = {
 		BT_PANU_PROCESS_GROUP, "T_BTPAN", BT_PAN_ELKA_PRIO, 0x4000, 2,
@@ -449,8 +450,8 @@ static void finish_poc(GBSTMR *timer) {
 
 	if (auto_restart && auto_reconnect && !exit_after_stop) {
 		/* PAN stays "on" (pan_running) while waiting; out of range every attempt fails,
-		 * so back off: 3, 5, 10, 20, then every 30 s */
-		static const unsigned delay_s[] = {3, 5, 10, 20, 30};
+		 * so back off: 3, 5, then every 10 s (user, was up to 30 s) */
+		static const unsigned delay_s[] = {3, 5, 10, 10, 10};
 		unsigned d = delay_s[reconnect_fails < 4 ? reconnect_fails : 4];
 
 		auto_restart = false;

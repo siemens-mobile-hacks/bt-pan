@@ -303,8 +303,15 @@ static void bt_pan_netif_post_run(ENIP_MODULE *module) {
 
 void bt_pan_netif_tx_event(struct bt_pan_netif *netif) {
 	netif->tx_posted = 0;
-	if (netif->registered)
+	if (netif->registered) {
 		enip_module_run(&netif->module, &netif->run_result);
+		/* ENIP queued a packet while we were running: its notify then only sets need_run_postrun (no post),
+		 * and later packets see a non-empty queue and never notify again = TX stalled for good. Run again. */
+		if (netif->module.need_run_postrun || netif->module.port.packets_queue.first) {
+			netif->module.need_run_postrun = 0;
+			bt_pan_netif_post_run(&netif->module);
+		}
+	}
 }
 
 static void bt_pan_netif_packet_available(ENIP_MODULE *module) {

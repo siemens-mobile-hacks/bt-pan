@@ -25,18 +25,15 @@ set(SOURCES
 )
 
 # Builds from one source: ELKA (EL71/E71 sw45) and SG (S65 sw58, #ifdef SGOLD; S65 BT in
-# src/bt_sg.h). ELKA_P60: BTPAN at priority 0x60 (as on S65) instead of 0x80, for an A/B test.
+# src/bt_sg.h). ELKA BTPAN priority 0x60 (as on S65; was 0x80, starved).
 # NSG: NewSGOLD without ELKA (S75 sw52, 132x176): the ELKA code with NSG menu flags,
 # keys and YDISP (swilib ui.h/gui.h), linked against lib/NSG.
-foreach(NAME ELKA ELKA_P60 NSG SG)
-	string(REGEX REPLACE "_P60$" "" PLATFORM ${NAME})
+foreach(NAME ELKA NSG SG)
+	set(PLATFORM ${NAME})
 	add_executable(bt-pan_${NAME} ${SOURCES})
 	target_include_directories(bt-pan_${NAME} PRIVATE src "${CMAKE_CURRENT_BINARY_DIR}")
 	target_sdk_setup(bt-pan_${NAME} ${PLATFORM})
 	target_compile_options(bt-pan_${NAME} BEFORE PUBLIC -std=c11 -Wall -Werror -Wno-error=main)
-	if(NAME MATCHES "_P60$")
-		target_compile_definitions(bt-pan_${NAME} PRIVATE BT_PAN_ELKA_PRIO=0x60)
-	endif()
 	set_target_properties(bt-pan_${NAME} PROPERTIES OUTPUT_NAME "bt-pan_${NAME}")
 	add_dependencies(bt-pan_${NAME} bump_build_id)
 endforeach()

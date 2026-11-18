@@ -233,6 +233,12 @@ int bt_panu_send(struct bt_panu *panu, const uint8_t *data, size_t len) {
 	if (panu->conn == BT_INVALID_HANDLE || !dev || panu->close_sent)
 		return 0;
 
+	/* TX_ACL alloc (EL71 FUN_a08ca168) tests the free count outside its protect: with 1 left, our write and the
+	 * BT task's own alloc can both pass and underflow it -> NULL -> fatal 5 (btmbuf, tx_acl). Leave the last
+	 * buffer to the stack: refuse (= pool full, the caller retries) while fewer than 2 are free. */
+	if (bt_pool && POOL_TX_FREE() < 2)
+		return 0;
+
 	/* L2CAP takes a whole SDU or nothing */
 	written = ((int (*)(const uint8_t *, int, int))dev->fn[2])(data, (int)len, dev->inst);
 	if (written > 0)
