@@ -79,9 +79,6 @@ extern unsigned bt_pan_tx_max;
  * (flash table A12E1E74: 0x4CD34 = 307 KB), not ours. */
 #define BT_PAN_EL71_RX_LIMIT 20000u
 
-/* Keep the connection alive long enough to test from the host. 1 hour. */
-#define BT_PANU_RUN_SECONDS 3600u
-
 /* Bluetooth PAN requires an L2CAP MTU of at least 1691 bytes. */
 #ifdef SGOLD
 /* S65 without the MTU patch: its L2CAP sends at most 0x14F (335) bytes per SDU (BTLP_uiSendData

@@ -390,13 +390,6 @@ static void begin_shutdown(GBSTMR *timer) {
 }
 
 /* 1 h session cap: with auto-reconnect it is just another reconnect */
-static void session_timeout(GBSTMR *timer) {
-	(void)timer;
-	if (!shutdown_started && auto_reconnect && !exit_after_stop)
-		auto_restart = true;
-	begin_shutdown(NULL);
-}
-
 static void reconnect_now(GBSTMR *timer) {
 	(void)timer;
 	reconnect_wait = false;
@@ -488,7 +481,7 @@ static int pan_start(void) {
 	shutdown_started = false;
 	pan_running = true;
 	GBS_SendMessage(BT_PANU_PROCESS_CEPID, BT_PANU_MESSAGE_INIT, 0, 0, 0);
-	GBS_StartTimerProc(&shutdown_timer, 216 * BT_PANU_RUN_SECONDS, session_timeout);
+	/* D155: no session limit (a 1 h test timer cut the link every hour, a reconnect followed) */
 	return 0;
 }
 
