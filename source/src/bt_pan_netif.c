@@ -124,6 +124,7 @@ static volatile uint32_t *bt_pan_sg_pool_used(void) {
 	switch (bt_sg_fw()) {
 	case SG_FW_S65V58: return (volatile uint32_t *)0xA876E4DCu;
 	case SG_FW_SK65V50: return (volatile uint32_t *)0xA8F17D90u;
+	case SG_FW_CX75V25: return (volatile uint32_t *)0xA85BABE0u; /* ENIP_PacketAlloc A0ADA6B6 */
 	default: return NULL;
 	}
 }
@@ -138,6 +139,7 @@ static volatile uint8_t *bt_pan_sg_pool_starve(void) {
 	switch (bt_sg_fw()) {
 	case SG_FW_S65V58: return (volatile uint8_t *)0xA876E4D8u;
 	case SG_FW_SK65V50: return (volatile uint8_t *)0xA8F17D8Cu;
+	case SG_FW_CX75V25: return (volatile uint8_t *)0xA85BABDCu;
 	default: return NULL;
 	}
 }
@@ -146,6 +148,7 @@ static uint8_t *const *bt_pan_sg_socks(void) {
 	switch (bt_sg_fw()) {
 	case SG_FW_S65V58: return (uint8_t *const *)(0xA876D5A0u + 0x45Cu);
 	case SG_FW_SK65V50: return (uint8_t *const *)(0xA8F16E54u + 0x45Cu);
+	case SG_FW_CX75V25: return (uint8_t *const *)(0xA85B9CA4u + 0x45Cu); /* walker A0B1C756 */
 	default: return NULL;
 	}
 }

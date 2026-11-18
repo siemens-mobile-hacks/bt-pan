@@ -79,17 +79,18 @@ static inline int ca_handle_ok(uint16_t h) {
 
 /* Which SGOLD firmware this is, told by the library's CA_L2CAP_New (4D6). Only for the few
  * fixed addresses below, which are read, never called. */
-enum { SG_FW_UNKNOWN, SG_FW_S65V58, SG_FW_SK65V50 };
+enum { SG_FW_UNKNOWN, SG_FW_S65V58, SG_FW_SK65V50, SG_FW_CX75V25 };
 
 static inline int bt_sg_fw(void) {
 	switch (LIB_ENTRY(0x4D6)) {
 	case 0xA0902E35u: return SG_FW_S65V58;
 	case 0xA038E7D1u: return SG_FW_SK65V50;
+	case 0xA0332E43u: return SG_FW_CX75V25; /* CX75-PORT.txt */
 	default: return SG_FW_UNKNOWN;
 	}
 }
 
-/* bt-pan-mtu_S65v58.vkp / _SK65v50.vkp: LDAEstReq accepts MTUs up to 0x6A0
+/* bt-pan-mtu_S65v58.vkp / _SK65v50.vkp / _CX75v25.vkp: LDAEstReq accepts MTUs up to 0x6A0
  * ("movs r7,#0xD4; lsls r7,#3"); this tests for the patch, it calls nothing. */
 static inline int bt_sg_mtu_patched(void) {
 	uint32_t site;
@@ -97,6 +98,7 @@ static inline int bt_sg_mtu_patched(void) {
 	switch (bt_sg_fw()) {
 	case SG_FW_S65V58: site = 0xA0B3E2BCu; break;
 	case SG_FW_SK65V50: site = 0xA06F9E94u; break;
+	case SG_FW_CX75V25: site = 0xA04FB070u; break;
 	default: return 0;
 	}
 	return *(const volatile uint32_t *)site == 0x00FF27D4u;

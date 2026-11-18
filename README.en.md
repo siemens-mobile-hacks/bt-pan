@@ -1,4 +1,4 @@
-# BT PAN for BenQ-Siemens EL71 sw45, E71 sw45, Siemens S65 sw58 and SK65 sw50
+# BT PAN for BenQ-Siemens EL71 sw45, E71 sw45, Siemens S65 sw58, SK65 sw50 and CX75 sw25
 
 [Русская версия](README.md)
 
@@ -10,10 +10,10 @@ tethering» on shares its connection, and the browser, Java and elfs go online a
 | File | What it is |
 |---|---|
 | `bt-pan_ELKA.elf` | the elf for EL71 and E71 |
-| `bt-pan_SG.elf` | the elf for S65 sw58 and SK65 sw50 |
+| `bt-pan_SG.elf` | the elf for S65 sw58, SK65 sw50 and CX75 sw25 |
 | `nap.sh` | PC side |
 | `speedtest-pc.py` | speed test server (`nap.sh` starts it; keep it next to `nap.sh`) |
-| `patches/` | `patches/el71/` for EL71, `patches/e71/` for E71, `patches/s65/` for S65, `patches/sk65/` for SK65 |
+| `patches/` | `patches/el71/` for EL71, `patches/e71/` for E71, `patches/s65/` for S65, `patches/sk65/` for SK65, `patches/cx75/` for CX75 |
 | `source/` | source code |
 | `phone-manual/` | guides with screenshots: GPRS profile, connecting the elf |
 
@@ -41,7 +41,18 @@ tethering» on shares its connection, and the browser, Java and elfs go online a
 3. `bt-pan-browser_SK65v50.vkp` — only for the built-in browser without a SIM card.
    Changes nothing while the elf isn't running.
 
-Browser on S65/SK65: in the profile set protocol HTTP, empty proxy, port 80, connection = the GPRS
+### CX75 sw25 (`patches/cx75/`)
+
+Needs ElfPack 3.3.2.
+
+1. `library-cx75-sw25-extended.vkp` — extended function library with Bluetooth functions.
+2. `bt-pan-mtu_CX75v25.vkp` — recommended: without it packets are at most 320 bytes and the PC
+   needs `sudo MTU=320 ./nap.sh`. The patch also gives 96 KB of general memory to the Bluetooth
+   buffers (without that the phone does not boot).
+3. `bt-pan-browser_CX75v25.vkp` — only for the built-in browser without a SIM card.
+   Does nothing while the elf is not running.
+
+Browser on S65/SK65/CX75: in the profile set protocol HTTP, empty proxy, port 80, connection = the GPRS
 profile, home page starting with `http://`.
 
 ## PC

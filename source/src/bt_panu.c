@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <string.h>
+#include <stdio.h>
 
 #include "bnep.h"
 
@@ -41,6 +42,7 @@ static volatile uint16_t *bt_pool;
 /* receive path progress (rx_follow, rx_guard, the watchdog): stack callback -> ring -> our drain */
 static volatile uint32_t rx_calls;
 static uint32_t rx_drained, rx_polls;
+static uint32_t tx_ok, tx_fail;	/* debug screen (BT_PAN_DBG) */
 
 #define POOL_RX_FREE() (bt_pool ? bt_pool[0] : 0)
 #define POOL_TX_FREE() (bt_pool ? bt_pool[1] : 0)
@@ -233,6 +235,10 @@ int bt_panu_send(struct bt_panu *panu, const uint8_t *data, size_t len) {
 
 	/* L2CAP takes a whole SDU or nothing */
 	written = ((int (*)(const uint8_t *, int, int))dev->fn[2])(data, (int)len, dev->inst);
+	if (written > 0)
+		++tx_ok;
+	else
+		++tx_fail;
 	return written < 0 ? 0 : written;
 }
 
@@ -808,4 +814,17 @@ int bt_panu_deinit(struct bt_panu *panu) {
 #endif
 	panu->state = BT_PANU_STATE_IDLE;
 	return 0;
+}
+
+/* debug screen lines (BT_PAN_DBG builds show them; cheap counters are always there) */
+void bt_panu_dbg_line(struct bt_panu *panu, int k, char *b, unsigned n) {
+	if (k == 0)
+		snprintf(b, n, "st%d cs%d dp%u cp%u held%d ring%u", (int)panu->state, (int)panu->close_sent,
+				 panu->drain_polls, panu->close_polls, (int)rx_held, (unsigned)(rx_head - rx_tail));
+	else if (k == 1)
+		snprintf(b, n, "cb%u dr%u pl%u tx%u/%u", (unsigned)rx_calls, (unsigned)rx_drained,
+				 (unsigned)rx_polls, (unsigned)tx_ok, (unsigned)tx_fail);
+	else
+		snprintf(b, n, "pool tx%u/%u rx%u/%u", POOL_TX_FREE(), panu->pool_tx_base, POOL_RX_FREE(),
+				 panu->pool_rx_base);
 }

@@ -1,6 +1,7 @@
 #pragma once
 
-/* SGOLD (S65v58 / SK65v50, identical ENIP code) TCP receive window, D136.
+/* SGOLD (S65v58 / SK65v50 / CX75v25, identical ENIP code) TCP receive window, D136.
+ * CX75v25: sock init A0B1C68E, socket table A85B9CA4+0x45C (walker A0B1C756).
  *
  * ENIP's TCP keeps the receive window in the socket as a plain counter, u16 at sock+0x10C:
  *  - sock init (S65 A134D6BE, SK65 A0A3004A): MSS sock+0x118 = route MTU - 40, window = 3 * MSS;

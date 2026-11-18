@@ -214,6 +214,8 @@ static void send_ping(GBSTMR *timer) {
  * keeps the link busy and proves the receive path. No answer in 20 s: kick the device; still nothing at 30 s: reconnect BT.
  */
 #define WATCH_TICKS (5u * 216u)
+/* debug screen (BT_PAN_DBG): BTPAN messages handled, the last one, rx_watch runs */
+static volatile unsigned dbg_msgs, dbg_last_msg, dbg_watch;
 static uint32_t watch_last;
 static unsigned watch_idle;
 
@@ -227,6 +229,7 @@ static void rx_watch(GBSTMR *timer) {
 	uint32_t count = bt_panu_rx_count();
 
 	(void)timer;
+	++dbg_watch;
 	if (shutdown_started || !netif.registered)
 		return;
 	bt_pan_rx_guard();
@@ -285,6 +288,8 @@ static void process_messages(void) {
 
 	if (!GBS_RecActDstMessage(&msg))
 		return;
+	++dbg_msgs;
+	dbg_last_msg = (unsigned)msg.msg;
 	if (GBS_MSG_ID(msg.msg) == GBS_MSG_ID(BT_PANU_MESSAGE_RX)) {
 		bt_panu_rx_event(&panu); /* the hot path */
 		return;

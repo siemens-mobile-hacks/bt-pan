@@ -90,4 +90,5 @@ void bt_panu_rx_guard(struct bt_panu *panu);
 void bt_panu_rx_event(struct bt_panu *panu);
 void bt_panu_rx_kick(struct bt_panu *panu);
 
+void bt_panu_dbg_line(struct bt_panu *panu, int k, char *b, unsigned n);
 #endif

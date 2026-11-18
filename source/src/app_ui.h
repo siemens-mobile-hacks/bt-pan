@@ -124,7 +124,7 @@ static SCREEN scr[SCR_N];
 
 enum {
 	M_CONNECT, M_STATUS, M_HINT, M_PC, M_AUTO, M_IP, M_GW, M_DNS, M_MTU, M_RX, M_TX,
-	M_TEST, M_PING, M_MIN, M_EXIT
+	M_TEST, M_PING, M_MIN, M_EXIT, M_DBG0, M_DBG1, M_DBG2, M_DBG3
 };
 enum { T_BTN0, T_RUN0, T_DL0, T_UL0, T_BTN1, T_RUN1, T_DL1, T_UL1, T_HINT };
 enum { P_BTN, P_SIZE, P_TO, P_ERR, P_LAST, P_REPLIES, P_LOST, P_AVG, P_MINMAX, P_HIST };
@@ -134,6 +134,9 @@ static int Rows(int s, unsigned char *r) {
 	switch (s) {
 		case SCR_MAIN:
 			r[n++] = M_CONNECT; r[n++] = M_STATUS;
+#ifdef BT_PAN_DBG
+			r[n++] = M_DBG0; r[n++] = M_DBG1; r[n++] = M_DBG2; r[n++] = M_DBG3;
+#endif
 			if (!pan_running && ui_patch != PATCH_OK) r[n++] = M_HINT;
 			r[n++] = M_PC; r[n++] = M_AUTO;
 			if (Online()) {
@@ -195,6 +198,10 @@ static void Sig(int s, unsigned *st, unsigned *live) {
 				MIX(a, panu.neg_tx_mtu); MIX(a, panu.neg_rx_mtu);
 			}
 			MIX(b, bt_pan_rx_bytes / 100u); MIX(b, bt_pan_tx_bytes / 100u);
+#ifdef BT_PAN_DBG
+			MIX(b, dbg_msgs); MIX(b, dbg_watch); MIX(b, bt_panu_rx_count()); MIX(b, panu.state);
+			MIX(b, panu.close_polls); MIX(b, panu.drain_polls); MIX(b, bt_panu_tx_free());
+#endif
 			MIX(b, rate_rx / 100u); MIX(b, rate_tx / 100u);
 			break;
 		case SCR_TEST:
@@ -233,6 +240,13 @@ static void MainItem(void *gui, int item_n, void *user) {
 			ItemText(gui, item_n, pan_running ? (Busy() ? "Please wait..." : "Disconnect") : "Connect");
 			return;
 		case M_STATUS: snprintf(b, sizeof(b), "Status: %s", UiStatus()); break;
+		case M_DBG0: case M_DBG1: case M_DBG2:
+			bt_panu_dbg_line(&panu, RowAt(SCR_MAIN, item_n) - M_DBG0, b, sizeof(b));
+			break;
+		case M_DBG3:
+			snprintf(b, sizeof(b), "msg%u %X w%u i%u run%d stop%d rc%d", dbg_msgs, dbg_last_msg, dbg_watch,
+					 watch_idle, pan_running, shutdown_started, reconnect_wait);
+			break;
 		case M_HINT:
 			ItemText(gui, item_n, ui_patch == PATCH_OLD ? "Undo the old hook patch, install the new one"
 													   : "No hook patch: the browser won't work");

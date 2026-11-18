@@ -1,4 +1,4 @@
-# BT PAN для BenQ-Siemens EL71 sw45, E71 sw45, Siemens S65 sw58 и SK65 sw50
+# BT PAN для BenQ-Siemens EL71 sw45, E71 sw45, Siemens S65 sw58, SK65 sw50 и CX75 sw25
 
 [English version](README.en.md)
 
@@ -10,10 +10,10 @@
 | Файл | Что это |
 |---|---|
 | `bt-pan_ELKA.elf` | эльф для EL71 и E71 |
-| `bt-pan_SG.elf` | эльф для S65 sw58 и SK65 sw50 |
+| `bt-pan_SG.elf` | эльф для S65 sw58, SK65 sw50 и CX75 sw25 |
 | `nap.sh` | для ПК |
 | `speedtest-pc.py` | сервер спидтеста (`nap.sh` запускает сам, лежать рядом) |
-| `patches/` | `patches/el71/` — патчи для EL71, `patches/e71/` — для E71, `patches/s65/` — для S65, `patches/sk65/` — для SK65 |
+| `patches/` | `patches/el71/` — патчи для EL71, `patches/e71/` — для E71, `patches/s65/` — для S65, `patches/sk65/` — для SK65, `patches/cx75/` — для CX75 |
 | `source/` | исходники |
 | `phone-manual/` | инструкции со скриншотами: GPRS-профиль, подключение эльфа |
 
@@ -42,7 +42,18 @@
 3. `bt-pan-browser_SK65v50.vkp` — нужен только встроенному браузеру без SIM-карты.
    Без запущенного эльфа ничего не меняет.
 
-Браузер на S65/SK65: в профиле протокол HTTP, прокси пусто, порт 80, соединение — GPRS-профиль,
+### CX75 sw25 (`patches/cx75/`)
+
+Нужен ElfPack 3.3.2.
+
+1. `library-cx75-sw25-extended.vkp` — расширенная библиотека функций с функциями Bluetooth.
+2. `bt-pan-mtu_CX75v25.vkp` — желательно: без него пакеты не больше 320 байт и на ПК нужен
+   `sudo MTU=320 ./nap.sh`. Патч также отдаёт 96 КБ общей памяти под буферы Bluetooth
+   (без этого телефон не включается).
+3. `bt-pan-browser_CX75v25.vkp` — нужен только встроенному браузеру без SIM-карты.
+   Без запущенного эльфа ничего не меняет.
+
+Браузер на S65/SK65/CX75: в профиле протокол HTTP, прокси пусто, порт 80, соединение — GPRS-профиль,
 домашняя страница с `http://`.
 
 ## ПК
